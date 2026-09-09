@@ -1,0 +1,20 @@
+# dependencies and build output
+/node_modules
+/.npm-cache
+/.next
+/out
+
+# local secrets
+.env
+.env.*
+!.env.example
+
+# tooling
+*.tsbuildinfo
+npm-debug.log*
+.DS_Store
+
+# source archives are preserved locally, not shipped with the app
+*.zip
+
+nexs proxy.md

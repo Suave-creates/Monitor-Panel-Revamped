@@ -1,0 +1,13 @@
+.git
+.next
+node_modules
+.npm-cache
+npm-debug.log*
+.env
+.env.*
+!.env.example
+*.zip
+*.tsbuildinfo
+Dockerfile*
+docker-compose*.yml
+README.md
