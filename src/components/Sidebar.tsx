@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
   Activity,
+  AlarmClockCheck,
   Boxes,
   ChevronsLeft,
   ChevronsRight,
@@ -14,6 +15,7 @@ import {
   ReceiptText,
   ScanBarcode,
 } from "lucide-react";
+import { ThemeToggle } from "./ThemeToggle";
 
 const COLLAPSE_STORAGE_KEY = "nexs-sidebar-collapsed";
 
@@ -23,6 +25,7 @@ const groups = [
     items: [
       { href: "/monitoring/kpi-dashboard", label: "KPI Dashboard", icon: Gauge },
       { href: "/packing-dispatch/do-order-visibility", label: "DO Visibility", icon: PackageCheck },
+      { href: "/delay-dashboard", label: "Delay Dashboard", icon: AlarmClockCheck },
     ],
   },
   {
@@ -69,15 +72,18 @@ export function Sidebar() {
         </span>
       </Link>
 
-      <button
-        type="button"
-        className="icon-button sidebar-toggle"
-        onClick={toggleCollapsed}
-        aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-        title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-      >
-        {collapsed ? <ChevronsRight size={15} /> : <ChevronsLeft size={15} />}
-      </button>
+      <div className="sidebar-controls">
+        <ThemeToggle />
+        <button
+          type="button"
+          className="icon-button sidebar-toggle"
+          onClick={toggleCollapsed}
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        >
+          {collapsed ? <ChevronsRight size={15} /> : <ChevronsLeft size={15} />}
+        </button>
+      </div>
 
       <nav className="sidebar-nav">
         <Link className={`nav-link ${pathname === "/" ? "active" : ""}`} href="/" title="Overview">
