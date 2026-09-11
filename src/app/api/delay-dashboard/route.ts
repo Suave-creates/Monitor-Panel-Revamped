@@ -54,10 +54,10 @@ const PAGE_SIZE = 1_000;
 // that silently truncates high-volume stages (confirmed on Bulk (CL/CLS)
 // stages with 100,000+ raw rows; the old fixed cap here stopped at 50,000).
 const MAX_PAGES = 300;
-const REPORT_TTL_MS = 20_000;
-const QCFAIL_TTL_MS = 30_000;
-const WAREHOUSE_TTL_MS = 30_000;
-const PACKING_DISPATCH_TTL_MS = 20_000;
+const REPORT_TTL_MS = 15 * 60_000;
+const QCFAIL_TTL_MS = 15 * 60_000;
+const WAREHOUSE_TTL_MS = 15 * 60_000;
+const PACKING_DISPATCH_TTL_MS = 15 * 60_000;
 const FRAME_TTL_MS = 6 * 60 * 60_000;
 const ITEM_DETAILS_TTL_MS = 10 * 60_000;
 const FRAME_CONCURRENCY = 16;

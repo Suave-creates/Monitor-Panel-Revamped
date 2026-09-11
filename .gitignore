@@ -4,6 +4,9 @@
 /.next
 /out
 
+# generated Prisma client — regenerated via `npx prisma generate`
+/src/generated
+
 # local secrets
 .env
 .env.*

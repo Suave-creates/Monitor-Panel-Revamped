@@ -32,6 +32,42 @@ export { DEPT_ORDER };
 export const SHIFT_HOURS = [17, 18, 19, 20, 21, 22, 23, 0, 1, 2, 3];
 export const SHIFT_START = 17;
 
+/** Per-department column set for shift snapshots — shared by the client's
+ *  live ShiftReportView and the server's scheduled snapshot capture so the
+ *  two never drift apart. */
+export const DEPT_CONFIG: Record<DeptKey, { columns: string[]; colLabel: Record<string, string>; holdCols: string[] }> = {
+  WAREHOUSE: {
+    columns: ["Synced", "JIT Processing", "Pending Picking", "In Picking"],
+    colLabel: {},
+    holdCols: [],
+  },
+  MEI: {
+    columns: ["EDGING", "IN_TRAY"],
+    colLabel: { EDGING: "EDGING", IN_TRAY: "IN TRAY" },
+    holdCols: [],
+  },
+  FITTING: {
+    columns: ["PENDING_CUSTOMIZATION"],
+    colLabel: { PENDING_CUSTOMIZATION: "PENDING CUSTOMISATION" },
+    holdCols: [],
+  },
+  QC: {
+    columns: ["QC_HOLD", "IN_QC", "CUSTOMIZATION_COMPLETE"],
+    colLabel: { QC_HOLD: "QC HOLD", IN_QC: "IN QC", CUSTOMIZATION_COMPLETE: "CUST COMPLETE" },
+    holdCols: ["QC_HOLD"],
+  },
+  QCFAIL: {
+    columns: ["ASRS", "LL", "IN_TRAY", "MEI", "FITTING", "ORDER_QC_REWORK"],
+    colLabel: { ASRS: "ASRS", LL: "LENS LAB", IN_TRAY: "IN TRAY", MEI: "MEI", FITTING: "FITTING", ORDER_QC_REWORK: "BACK AT QC" },
+    holdCols: [],
+  },
+  PACKING_DISPATCH: {
+    columns: ["Packing", "Manifest"],
+    colLabel: {},
+    holdCols: [],
+  },
+};
+
 export function shiftCycleKey(h: number): number {
   return (h - SHIFT_START + 24) % 24;
 }
@@ -91,9 +127,10 @@ export function histAdd(hist: Record<number, number>, dwell: number): void {
 export function captureSnapshot(
   items: { column: string; dwell: number }[],
   columns: string[],
+  hour?: number,
 ): Snapshot {
   const now = new Date();
-  const bucket = now.getHours();
+  const bucket = hour ?? now.getHours();
   const snap: Snapshot = { ts: now.toISOString(), bucket, cols: {}, hist: {}, rowTotal: 0 };
   columns.forEach((c) => { snap.cols[c] = [0, 0, 0, 0]; snap.hist[c] = {}; });
   const dwt = [1, 2, 3];

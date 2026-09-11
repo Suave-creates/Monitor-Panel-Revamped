@@ -48,9 +48,9 @@ const ANALYTICS_APP_ID = process.env.NEXS_ANALYTICS_APP_ID || "nexs-analytics";
 // D1/D2 gauges scope to FR1+FR2 (summed); NDD scopes to every FR tag (null = all).
 const GAUGE_FRS: string[] = ["FR1", "FR2"];
 const SECTION = "FULFILLABLE_ORDERS";
-const DASHBOARD_TTL_MS = 15_000;
-const DETAILS_TTL_MS = 30_000;
-const INFOCORNER_TTL_MS = 6 * 60 * 60_000;
+const DASHBOARD_TTL_MS = 15 * 60_000;
+const DETAILS_TTL_MS = 15 * 60_000;
+const INFOCORNER_TTL_MS = 60 * 60_000;
 const PAGE_SIZE = 1_000;
 const MAX_DETAIL_PAGES = 50;
 const NO_STORE_HEADERS = { "Cache-Control": "no-store, max-age=0" } as const;

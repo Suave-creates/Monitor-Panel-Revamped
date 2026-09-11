@@ -41,7 +41,7 @@ const PAGE_SIZE = 500;
 // response's own `total` field (see fetchDeptStage) and fetched in
 // parallel, so this ceiling only guards against a corrupted/absurd total.
 const MAX_PAGES = 600;
-const REPORT_TTL_MS = 20_000;
+const REPORT_TTL_MS = 15 * 60_000;
 const NO_STORE_HEADERS = { "Cache-Control": "no-store, max-age=0" } as const;
 
 type Facility = "NXS1" | "NXS2";

@@ -18,6 +18,7 @@ import {
   activeBuckets,
   bandFromHist,
   bucketColLabel,
+  DEPT_CONFIG,
   fmt,
   getLatestBucket,
   loadAllSnapshots,
@@ -33,39 +34,6 @@ import {
   type StageSnapshots,
 } from "../lib/shiftReport";
 import { downloadTextFile, type PipelineData, type QcfailData } from "../types";
-
-const DEPT_CONFIG: Record<DeptKey, { columns: string[]; colLabel: Record<string, string>; holdCols: string[] }> = {
-  WAREHOUSE: {
-    columns: ["Synced", "JIT Processing", "Pending Picking", "In Picking"],
-    colLabel: {},
-    holdCols: [],
-  },
-  MEI: {
-    columns: ["EDGING", "IN_TRAY"],
-    colLabel: { EDGING: "EDGING", IN_TRAY: "IN TRAY" },
-    holdCols: [],
-  },
-  FITTING: {
-    columns: ["PENDING_CUSTOMIZATION"],
-    colLabel: { PENDING_CUSTOMIZATION: "PENDING CUSTOMISATION" },
-    holdCols: [],
-  },
-  QC: {
-    columns: ["QC_HOLD", "IN_QC", "CUSTOMIZATION_COMPLETE"],
-    colLabel: { QC_HOLD: "QC HOLD", IN_QC: "IN QC", CUSTOMIZATION_COMPLETE: "CUST COMPLETE" },
-    holdCols: ["QC_HOLD"],
-  },
-  QCFAIL: {
-    columns: ["ASRS", "LL", "IN_TRAY", "MEI", "FITTING", "ORDER_QC_REWORK"],
-    colLabel: { ASRS: "ASRS", LL: "LENS LAB", IN_TRAY: "IN TRAY", MEI: "MEI", FITTING: "FITTING", ORDER_QC_REWORK: "BACK AT QC" },
-    holdCols: [],
-  },
-  PACKING_DISPATCH: {
-    columns: ["Packing", "Manifest"],
-    colLabel: {},
-    holdCols: [],
-  },
-};
 const DCLS = ["d1", "d2", "d3"];
 const EMPTY_STAGES = {} as StagesData;
 

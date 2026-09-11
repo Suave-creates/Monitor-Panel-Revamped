@@ -9,17 +9,20 @@ Next.js routes, and those routes authenticate to NexS on the server.
 
 ```powershell
 npm.cmd install
+npx prisma generate
 npm.cmd run dev
 ```
 
 Open `http://localhost:3000`. Copy `.env.example` to `.env` when setting
 up a new machine; never expose NexS credentials through `NEXT_PUBLIC_*` values.
+`npx prisma generate` regenerates `src/generated/mydb` (not checked in) — rerun
+it after cloning or after any change to `prisma/schema.prisma`. Applying a new
+migration to the `mydb` database itself requires `npx prisma migrate deploy`.
 
-Production mode fails closed unless `APP_BASIC_AUTH_USER` and
-`APP_BASIC_AUTH_PASSWORD` are configured. Development mode permits local access
-without them. Basic authentication must be served through an HTTPS reverse
-proxy (and preferably the corporate VPN); replace the access gate with company
-SSO when an identity provider integration is available.
+The app has no built-in access gate — every route is open to anyone who can
+reach the host. `APP_BASIC_AUTH_USER`/`APP_BASIC_AUTH_PASSWORD` are no longer
+enforced; restrict access at the network layer (VPN, firewall, reverse proxy)
+if that's needed.
 
 ### Run with Docker
 

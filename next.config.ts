@@ -4,6 +4,7 @@ const nextConfig: NextConfig = {
   output: "standalone",
   poweredByHeader: false,
   reactStrictMode: true,
+  allowedDevOrigins: ["192.168.27.170", "172.18.176.1"],
   async headers() {
     const securityHeaders = [
       { key: "Referrer-Policy", value: "no-referrer" },

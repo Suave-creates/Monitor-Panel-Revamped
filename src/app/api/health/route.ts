@@ -5,8 +5,7 @@ export const dynamic = "force-dynamic";
 
 export function GET(request: Request) {
   const readinessRequested = new URL(request.url).searchParams.get("ready") === "1";
-  const ready = nexsAuthConfigured()
-    && Boolean(process.env.APP_BASIC_AUTH_USER && process.env.APP_BASIC_AUTH_PASSWORD);
+  const ready = nexsAuthConfigured();
   const status = readinessRequested && !ready ? 503 : 200;
   return NextResponse.json(
     {

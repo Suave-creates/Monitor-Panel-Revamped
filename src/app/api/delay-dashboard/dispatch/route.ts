@@ -39,7 +39,7 @@ const PAGE_SIZE = 500;
 // truncates high-volume stages instead of erroring, producing quietly
 // wrong totals. Pages are driven by the response's own `total` field.
 const MAX_PAGES = 600;
-const REPORT_TTL_MS = 20_000;
+const REPORT_TTL_MS = 15 * 60_000;
 const NO_STORE_HEADERS = { "Cache-Control": "no-store, max-age=0" } as const;
 
 type Facility = "NXS1" | "NXS2";

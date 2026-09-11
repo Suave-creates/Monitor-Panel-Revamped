@@ -1,0 +1,5 @@
+-- Baseline migration: `production_tracker` already had 16 tables before
+-- Prisma Migrate started tracking this database. This migration
+-- intentionally does nothing — it exists only so Prisma has a starting
+-- point in `_prisma_migrations` that predates those pre-existing,
+-- Prisma-unmanaged tables. See https://pris.ly/d/migrate-baseline.

@@ -216,13 +216,13 @@ export default function DelayDashboardPage() {
   // lazily: once on first visit to their tab, and again only if a
   // filter changed since their last fetch (tracked via the *StaleRef
   // flags below) — never just from switching tabs back and forth.
-  const load = useCallback(async () => {
+  const load = useCallback(async (force = false) => {
     const sequence = ++requestSequence.current;
     setLoading(true);
     setError(null);
     try {
       const dateRange = dateRangeFor(dateMode, startDate, endDate, startTime, endTime);
-      const base = { facility, nddOnly, jit, frFilter, international, dateRange };
+      const base = { facility, nddOnly, jit, frFilter, international, dateRange, force };
       const post = (action: string, extra: Record<string, unknown> = {}) =>
         fetch("/api/delay-dashboard", {
           method: "POST",
@@ -256,7 +256,7 @@ export default function DelayDashboardPage() {
   }, [facility, nddOnly, jit, frFilter, frameFilter, international, dateMode, startDate, endDate, startTime, endTime]);
 
   const dispatchRequestSequence = useRef(0);
-  const loadDispatch = useCallback(async () => {
+  const loadDispatch = useCallback(async (force = false) => {
     const sequence = ++dispatchRequestSequence.current;
     setDispatchLoading(true);
     setDispatchError(null);
@@ -265,7 +265,7 @@ export default function DelayDashboardPage() {
       const res = await fetch("/api/delay-dashboard/dispatch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ facility, nddOnly, jit, international, dateRange }),
+        body: JSON.stringify({ facility, nddOnly, jit, international, dateRange, force }),
       }).then((r) => r.json());
       if (sequence !== dispatchRequestSequence.current) return;
       if (res.ok !== true) throw new Error(res.error || "Request failed");
@@ -279,7 +279,7 @@ export default function DelayDashboardPage() {
   }, [facility, nddOnly, jit, international, dateMode, startDate, endDate, startTime, endTime]);
 
   const clRequestSequence = useRef(0);
-  const loadCl = useCallback(async () => {
+  const loadCl = useCallback(async (force = false) => {
     const sequence = ++clRequestSequence.current;
     setClLoading(true);
     setClError(null);
@@ -288,7 +288,7 @@ export default function DelayDashboardPage() {
       const res = await fetch("/api/delay-dashboard/cl", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ facility, nddOnly, jit, international, dateRange }),
+        body: JSON.stringify({ facility, nddOnly, jit, international, dateRange, force }),
       }).then((r) => r.json());
       if (sequence !== clRequestSequence.current) return;
       if (res.ok !== true) throw new Error(res.error || "Request failed");
@@ -787,9 +787,9 @@ export default function DelayDashboardPage() {
             className="button primary"
             disabled={loading || (view === "dispatch" && dispatchLoading) || (view === "cl" && clLoading)}
             onClick={() => {
-              void load();
-              if (view === "dispatch") void loadDispatch();
-              if (view === "cl") void loadCl();
+              void load(true);
+              if (view === "dispatch") void loadDispatch(true);
+              if (view === "cl") void loadCl(true);
             }}
           >
             {loading || (view === "dispatch" && dispatchLoading) || (view === "cl" && clLoading)

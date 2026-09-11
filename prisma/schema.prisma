@@ -1,0 +1,28 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/mydb"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+/// One row per (day, hour, facility, department) — the NDD Shift Report's
+/// hourly snapshot, persisted server-side so it survives across browsers
+/// and shifts instead of living only in localStorage. A scheduled job
+/// captures this once per hour, at :58, for every IST calendar day.
+model NddShiftLog {
+  id         Int      @id @default(autoincrement())
+  day        DateTime @db.Date
+  hour       Int      @db.TinyInt
+  facility   String   @db.VarChar(8)
+  dept       String   @db.VarChar(32)
+  cols       Json
+  hist       Json
+  rowTotal   Int
+  capturedAt DateTime @default(now())
+
+  @@unique([day, hour, facility, dept])
+  @@index([day])
+  @@map("ndd_shift_logs")
+}
