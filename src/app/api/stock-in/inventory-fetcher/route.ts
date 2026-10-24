@@ -14,7 +14,7 @@ export const dynamic = "force-dynamic";
 
 const INVENTORY_TTL_MS = 2 * 60_000;
 const PRODUCT_TTL_MS = 6 * 60 * 60_000;
-const MAX_PIDS = 100;
+const MAX_PIDS = 25_000;
 const CONCURRENCY = 6;
 const NO_STORE_HEADERS = { "Cache-Control": "private, no-store, max-age=0" };
 

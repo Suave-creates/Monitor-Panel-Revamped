@@ -14,11 +14,17 @@ type Facility = "NXS1" | "NXS2";
 type OrderMode = "njit" | "jit";
 type GaugeKey = "d1" | "d2" | "ndd";
 type UnknownRecord = Record<string, unknown>;
+type PriorityFilter = 1 | 2 | null;
+type DenominatorColumns = { D_1: number | null; D_2: number | null; TODAY: number | null };
 
 type InfocornerNumbers = {
   dates: UnknownRecord;
-  regular: { D_1: number | null; D_2: number | null; TODAY: number | null };
-  jit: { D_1: number | null; D_2: number | null; TODAY: number | null };
+  regular: DenominatorColumns;
+  jit: DenominatorColumns;
+  p2: {
+    regular: DenominatorColumns;
+    jit: DenominatorColumns;
+  };
 };
 
 type StageCount = { stage: string; count: number; percentOfDay: number | null };
@@ -29,6 +35,7 @@ type GaugeResult = {
   sublabel: string;
   day: string;
   mode: OrderMode;
+  priority: PriorityFilter;
   target: number;
   denominator: number | null;
   open: number;
@@ -42,12 +49,22 @@ type GaugeResult = {
   frFound: boolean;
 };
 
-const GRID_URL = `${NEXS_BASE_URL}/nexs/analytics/monitoring/v3/homePage?version=v3`;
-const DETAILS_URL = `${NEXS_BASE_URL}/nexs/analytics/monitoring/v3/details?version=v3`;
+const GRID_URLS: Record<OrderMode, string> = {
+  njit: `${NEXS_BASE_URL}/nexs/analytics/monitoring/v3/homePage?version=v3`,
+  jit: `${NEXS_BASE_URL}/nexs/analytics/monitoring/jit/home`,
+};
+const DETAILS_URLS: Record<OrderMode, string> = {
+  njit: `${NEXS_BASE_URL}/nexs/analytics/monitoring/v3/details?version=v3`,
+  jit: `${NEXS_BASE_URL}/nexs/analytics/monitoring/jit/detail`,
+};
 const ANALYTICS_APP_ID = process.env.NEXS_ANALYTICS_APP_ID || "nexs-analytics";
-// D1/D2 gauges scope to FR1+FR2 (summed); NDD scopes to every FR tag (null = all).
+// NJIT D1/D2 gauges scope to FR1+FR2 (summed); JIT and NDD use every returned tag.
 const GAUGE_FRS: string[] = ["FR1", "FR2"];
-const SECTION = "FULFILLABLE_ORDERS";
+const JIT_FRS: string[] = ["LENS LAB", "EXTERNAL VENDOR", "DO LENS LAB"];
+const SECTIONS: Record<OrderMode, string> = {
+  njit: "FULFILLABLE_ORDERS",
+  jit: "JIT_ORDERS",
+};
 const DASHBOARD_TTL_MS = 15 * 60_000;
 const DETAILS_TTL_MS = 15 * 60_000;
 const INFOCORNER_TTL_MS = 60 * 60_000;
@@ -58,7 +75,7 @@ const NO_STORE_HEADERS = { "Cache-Control": "no-store, max-age=0" } as const;
 // Only server-controlled, per-facility URLs are reachable. Request data can
 // select a facility, never an arbitrary host.
 const INFOCORNER_URLS: Record<Facility, string> = {
-  NXS1: process.env.INFOCORNER_NXS1_URL || "http://192.168.27.132:3069/api/infocorner/numbers",
+  NXS1: process.env.INFOCORNER_NXS1_URL || "http://192.168.27.170:3069/api/infocorner/numbers",
   NXS2: process.env.INFOCORNER_NXS2_URL || "http://192.168.27.170:3069/api/infocorner/numbers",
 };
 
@@ -82,6 +99,7 @@ function asRecordArray(value: unknown): UnknownRecord[] {
 }
 
 function finiteNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
@@ -121,7 +139,12 @@ function expectedDay(key: GaugeKey): string {
   return indiaDay(key === "d1" ? 1 : key === "d2" ? 2 : 0);
 }
 
-function monitorBody(facility: Facility, mode: OrderMode, day: string, priorityOne: boolean): UnknownRecord {
+function monitorBody(
+  facility: Facility,
+  mode: OrderMode,
+  day: string,
+  priority: PriorityFilter,
+): UnknownRecord {
   return {
     monitorPanelFilters: {
       binaryFilter: {
@@ -135,7 +158,7 @@ function monitorBody(facility: Facility, mode: OrderMode, day: string, priorityO
         date: { startValue: `${day} 00:00:00`, endValue: `${day} 23:59:59` },
       },
       multiSelectFilters: {
-        pickingPriority: priorityOne ? [1] : [],
+        pickingPriority: priority === null ? [] : [priority],
         qcStatus: [],
         itemType: [],
         orderChannel: [],
@@ -156,22 +179,26 @@ function reportTimestamp(payload: unknown): string | null {
   return typeof value === "string" && value ? value : null;
 }
 
-function rowsForSeverity(root: UnknownRecord, severity: string): UnknownRecord[] {
+function rowsForSeverity(root: UnknownRecord, severity: string, section: string): UnknownRecord[] {
   const layer = asRecord(root[severity]);
-  if (layer) return asRecordArray(layer[SECTION]);
-  return severity === "standard" ? asRecordArray(root[SECTION]) : [];
+  if (layer) return asRecordArray(layer[section]);
+  return severity === "standard" ? asRecordArray(root[section]) : [];
 }
 
-// frs = null sums every FR tag in the response (NDD); an array sums only those
-// tags (D1/D2 -> FR1 + FR2). Matches the reference dashboard's GAUGE_FRS / allFr scoping.
-function aggregateGrid(root: UnknownRecord, severities: string[], frs: string[] | null) {
+// frs = null sums every FR tag in the response; an array sums only those tags.
+function aggregateGrid(
+  root: UnknownRecord,
+  severities: string[],
+  section: string,
+  frs: string[] | null,
+) {
   const stages = new Map<string, number>();
   const tagsSeen = new Set<string>();
   let open = 0;
   let readyToShip = 0;
 
   for (const severity of severities) {
-    for (const row of rowsForSeverity(root, severity)) {
+    for (const row of rowsForSeverity(root, severity, section)) {
       const tag = String(row["Fr Tag"] ?? row.frTag ?? "").trim();
       if (!tag || tag.toUpperCase() === "TOTAL") continue;
       tagsSeen.add(tag);
@@ -190,22 +217,23 @@ function aggregateGrid(root: UnknownRecord, severities: string[], frs: string[] 
   return { open, readyToShip, stages, frFound };
 }
 
-function parseGrid(payload: unknown, frs: string[] | null) {
+function parseGrid(payload: unknown, section: string, frs: string[] | null) {
   const root = payloadRoot(payload);
-  const standard = aggregateGrid(root, ["standard"], frs);
+  const standard = aggregateGrid(root, ["standard"], section, frs);
   const selected = standard.open > 0 || standard.stages.size > 0
     ? standard
-    : aggregateGrid(root, ["current", "critical", "severe"], frs);
+    : aggregateGrid(root, ["current", "critical", "severe"], section, frs);
   return { ...selected, reportAsOn: reportTimestamp(payload) };
 }
 
 function parseInfocorner(payload: unknown, facility: Facility): InfocornerNumbers {
   const root = payloadRoot(payload);
   const rows = asRecordArray(root.rows);
+  const p2Rows = asRecordArray(asRecord(root.p2)?.rows);
   const dates = asRecord(root.dates) ?? {};
   const todayKey = indiaDay(0).replace(/-/g, "_");
 
-  const rowFor = (type: string) => rows.find((row) =>
+  const rowFor = (source: UnknownRecord[], type: string) => source.find((row) =>
     String(row.facility_code ?? "").toUpperCase() === facility
     && String(row.order_item_type ?? "").toUpperCase() === type,
   );
@@ -218,16 +246,35 @@ function parseInfocorner(payload: unknown, facility: Facility): InfocornerNumber
     }
     return null;
   };
-  const columns = (type: string) => {
-    const row = rowFor(type);
+  const dateKeys = (value: unknown): string[] => {
+    if (typeof value !== "string" || !value) return [];
+    return [...new Set([value, value.replace(/-/g, "_"), value.replace(/_/g, "-")])];
+  };
+  const columns = (source: UnknownRecord[], type: string, p2Only = false): DenominatorColumns => {
+    const row = rowFor(source, type);
+    const d1Keys = dateKeys(dates.day_minus_1);
+    const d2Keys = dateKeys(dates.day_minus_2);
+    const todayKeys = [
+      ...dateKeys(dates.day_minus_0),
+      ...dateKeys(dates.today),
+      todayKey,
+    ];
     return {
-      D_1: read(row, ["D_1", dates.day_minus_1]),
-      D_2: read(row, ["D_2", dates.day_minus_2]),
-      TODAY: read(row, ["TODAY", "today", "TODAY_ORDERS", dates.day_minus_0, dates.today, todayKey]),
+      D_1: read(row, p2Only ? d1Keys : ["D_1", ...d1Keys]),
+      D_2: read(row, p2Only ? d2Keys : ["D_2", ...d2Keys]),
+      TODAY: read(row, p2Only ? todayKeys : ["TODAY", "today", "TODAY_ORDERS", ...todayKeys]),
     };
   };
 
-  return { dates, regular: columns("REGULAR"), jit: columns("JIT") };
+  return {
+    dates,
+    regular: columns(rows, "REGULAR"),
+    jit: columns(rows, "JIT"),
+    p2: {
+      regular: columns(p2Rows, "REGULAR", true),
+      jit: columns(p2Rows, "JIT", true),
+    },
+  };
 }
 
 async function loadInfocorner(facility: Facility) {
@@ -240,7 +287,13 @@ async function loadInfocorner(facility: Facility) {
       try {
         const payload = await fetchJson<unknown>(url, { method: "GET", redirect: "follow" }, 12_000);
         const parsed = parseInfocorner(payload, facility);
-        if (parsed.regular.D_1 !== null || parsed.jit.D_1 !== null || parsed.regular.TODAY !== null) {
+        if (
+          parsed.regular.D_1 !== null
+          || parsed.jit.D_1 !== null
+          || parsed.regular.TODAY !== null
+          || parsed.p2.regular.D_1 !== null
+          || parsed.p2.jit.D_1 !== null
+        ) {
           return parsed;
         }
       } catch (error) {
@@ -259,25 +312,33 @@ type GaugeSpec = {
   day: string;
   mode: OrderMode;
   target: number;
-  priorityOne: boolean;
+  priority: PriorityFilter;
   denominatorColumn: "D_1" | "D_2" | "TODAY";
+  section: string;
   frs: string[] | null; // null = every FR tag summed (NDD)
 };
 
-function gaugeSpecs(mode: OrderMode, includeNdd: boolean): GaugeSpec[] {
+function gaugeSpecs(mode: OrderMode, includeNdd: boolean, p2Only: boolean): GaugeSpec[] {
+  const priority: PriorityFilter = p2Only ? 2 : null;
+  const d1Target = p2Only ? 99 : 95;
+  // The JIT response has its own tags (Lens Lab, External Vendor, etc.),
+  // so its D1/D2 gauges aggregate all returned tags instead of FR1 + FR2.
+  const d1D2Frs = mode === "jit" ? null : GAUGE_FRS;
   const specs: GaugeSpec[] = [
-    { key: "d1", label: "D1", sublabel: "Yesterday", day: indiaDay(1), mode, target: 95, priorityOne: false, denominatorColumn: "D_1", frs: GAUGE_FRS },
-    { key: "d2", label: "D2", sublabel: "Day before", day: indiaDay(2), mode, target: 99.5, priorityOne: false, denominatorColumn: "D_2", frs: GAUGE_FRS },
+    { key: "d1", label: "D1", sublabel: "Yesterday", day: indiaDay(1), mode, target: d1Target, priority, denominatorColumn: "D_1", section: SECTIONS[mode], frs: d1D2Frs },
+    { key: "d2", label: "D2", sublabel: "Day before", day: indiaDay(2), mode, target: 99.5, priority, denominatorColumn: "D_2", section: SECTIONS[mode], frs: d1D2Frs },
   ];
   if (includeNdd) {
-    specs.push({ key: "ndd", label: "NDD", sublabel: "Today · priority 1", day: indiaDay(0), mode: "njit", target: 99, priorityOne: true, denominatorColumn: "TODAY", frs: null });
+    specs.push({ key: "ndd", label: "NDD", sublabel: "Today · priority 1", day: indiaDay(0), mode: "njit", target: 99, priority: 1, denominatorColumn: "TODAY", section: SECTIONS.njit, frs: null });
   }
   return specs;
 }
 
 function buildGauge(spec: GaugeSpec, payload: unknown, info: InfocornerNumbers | null): GaugeResult {
-  const parsed = parseGrid(payload, spec.frs);
-  const denominatorTable = spec.mode === "jit" ? info?.jit : info?.regular;
+  const parsed = parseGrid(payload, spec.section, spec.frs);
+  const denominatorTable = spec.priority === 2
+    ? (spec.mode === "jit" ? info?.p2.jit : info?.p2.regular)
+    : (spec.mode === "jit" ? info?.jit : info?.regular);
   const rawDenominator = denominatorTable?.[spec.denominatorColumn] ?? null;
   const denominator = rawDenominator !== null && rawDenominator > 0 ? rawDenominator : null;
   const remaining = Math.max(0, parsed.open - parsed.readyToShip);
@@ -303,6 +364,7 @@ function buildGauge(spec: GaugeSpec, payload: unknown, info: InfocornerNumbers |
     sublabel: spec.sublabel,
     day: spec.day,
     mode: spec.mode,
+    priority: spec.priority,
     target: spec.target,
     denominator,
     open: parsed.open,
@@ -317,19 +379,25 @@ function buildGauge(spec: GaugeSpec, payload: unknown, info: InfocornerNumbers |
   };
 }
 
-async function fetchDashboard(request: Request, facility: Facility, mode: OrderMode, includeNdd: boolean) {
-  const specs = gaugeSpecs(mode, includeNdd);
+async function fetchDashboard(
+  request: Request,
+  facility: Facility,
+  mode: OrderMode,
+  includeNdd: boolean,
+  p2Only: boolean,
+) {
+  const specs = gaugeSpecs(mode, includeNdd, p2Only);
   // Manual dashboard refreshes bypass only the short analytics cache. The
-  // internal infocorner denominator remains protected by its six-hour TTL.
+  // internal infocorner denominator remains protected by its one-hour TTL.
   const infoPromise = loadInfocorner(facility)
     .then((result) => ({ value: result.value, cache: result.cache, error: null as string | null }))
     .catch((error: unknown) => ({ value: null, cache: null, error: errorMessage(error) }));
 
   const payloads = await withAuthRetry(request, ANALYTICS_APP_ID, "all", (auth) =>
-    Promise.all(specs.map((spec) => fetchJson<unknown>(GRID_URL, {
+    Promise.all(specs.map((spec) => fetchJson<unknown>(GRID_URLS[spec.mode], {
       method: "POST",
       headers: { ...operationalHeaders(facility), ...auth },
-      body: JSON.stringify(monitorBody(facility, spec.mode, spec.day, spec.priorityOne)),
+      body: JSON.stringify(monitorBody(facility, spec.mode, spec.day, spec.priority)),
     }, 25_000))),
   );
   const infoResult = await infoPromise;
@@ -337,6 +405,7 @@ async function fetchDashboard(request: Request, facility: Facility, mode: OrderM
   return {
     facility,
     mode,
+    p2Only,
     generatedAt: new Date().toISOString(),
     gauges: specs.map((spec, index) => buildGauge(spec, payloads[index], infoResult.value)),
     infocorner: {
@@ -359,10 +428,11 @@ function extractDetailPage(payload: unknown): { rows: UnknownRecord[]; total: nu
   return { rows, total: finiteNumber(box.total ?? top.total) };
 }
 
-// D1/D2 dump FR1 and FR2 separately and merge (the details API takes one frTag
-// per call); NDD dumps with an empty frTag, which returns every FR tag.
-function detailFrTags(key: GaugeKey): string[] {
-  return key === "ndd" ? [""] : GAUGE_FRS;
+// NJIT and JIT detail APIs take one FR tag per call, so their configured tags
+// are fetched separately and merged. NDD uses an empty tag to return all tags.
+function detailFrTags(key: GaugeKey, mode: OrderMode): string[] {
+  if (key === "ndd") return [""];
+  return mode === "jit" ? JIT_FRS : GAUGE_FRS;
 }
 
 async function fetchDetails(
@@ -372,11 +442,13 @@ async function fetchDetails(
   key: GaugeKey,
   day: string,
   stage: string,
+  p2Only: boolean,
 ) {
   const effectiveMode: OrderMode = key === "ndd" ? "njit" : mode;
-  const filters = monitorBody(facility, effectiveMode, day, key === "ndd");
+  const priority: PriorityFilter = key === "ndd" ? 1 : p2Only ? 2 : null;
+  const filters = monitorBody(facility, effectiveMode, day, priority);
   const filterBox = asRecord(filters.monitorPanelFilters) ?? {};
-  const frTags = detailFrTags(key);
+  const frTags = detailFrTags(key, effectiveMode);
 
   return withAuthRetry(request, ANALYTICS_APP_ID, "all", async (auth) => {
     const rows: UnknownRecord[] = [];
@@ -384,14 +456,14 @@ async function fetchDetails(
     for (const frTag of frTags) {
       let page = 0;
       while (page < MAX_DETAIL_PAGES) {
-        const payload = await fetchJson<unknown>(DETAILS_URL, {
+        const payload = await fetchJson<unknown>(DETAILS_URLS[effectiveMode], {
           method: "POST",
           headers: { ...operationalHeaders(facility), ...auth },
           body: JSON.stringify({
             page,
             pageSize: PAGE_SIZE,
             globalSearch: "",
-            category: SECTION,
+            category: SECTIONS[effectiveMode],
             status: stage,
             frTag,
             version: "v3",
@@ -436,8 +508,14 @@ export async function POST(request: Request) {
 
     if (action === "dashboard") {
       const includeNdd = input.includeNdd !== false;
-      const key = cacheKey("monitoring-kpi-dashboard", { facility, mode, includeNdd });
-      const result = await cached(key, DASHBOARD_TTL_MS, () => fetchDashboard(request, facility, mode, includeNdd), force);
+      const p2Only = input.p2Only === true;
+      const key = cacheKey("monitoring-kpi-dashboard", { facility, mode, includeNdd, p2Only });
+      const result = await cached(
+        key,
+        DASHBOARD_TTL_MS,
+        () => fetchDashboard(request, facility, mode, includeNdd, p2Only),
+        force,
+      );
       return jsonResponse({ ok: true, data: result.value, cache: result.cache });
     }
 
@@ -445,13 +523,14 @@ export async function POST(request: Request) {
       const gauge = parseGaugeKey(input.gauge);
       const day = typeof input.day === "string" ? input.day : "";
       const stage = typeof input.stage === "string" ? input.stage.trim() : "";
+      const p2Only = input.p2Only === true;
       if (day !== expectedDay(gauge)) throw new InputError("The detail date is outside the active gauge window.");
       if (!stage || stage.length > 160) throw new InputError("A valid stage is required.");
-      const key = cacheKey("monitoring-kpi-dashboard-details", { facility, mode, gauge, day, stage });
+      const key = cacheKey("monitoring-kpi-dashboard-details", { facility, mode, gauge, day, stage, p2Only });
       const result = await cached(
         key,
         DETAILS_TTL_MS,
-        () => fetchDetails(request, facility, mode, gauge, day, stage),
+        () => fetchDetails(request, facility, mode, gauge, day, stage, p2Only),
         force,
       );
       return jsonResponse({ ok: true, data: result.value, cache: result.cache });

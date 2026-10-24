@@ -12,6 +12,7 @@ type LimiterState = { active: number; queue: QueueTicket[]; max: number };
 
 declare global {
   var __nexsUpstreamLimiter: LimiterState | undefined;
+  var __nexsBarcodeBLimiter: LimiterState | undefined;
 }
 
 const configuredLimit = Number(process.env.NEXS_MAX_CONCURRENCY || 12);
@@ -22,6 +23,8 @@ const limiter: LimiterState = globalThis.__nexsUpstreamLimiter ?? {
   max: Number.isFinite(configuredLimit) ? Math.max(2, Math.min(40, configuredLimit)) : 12,
 };
 globalThis.__nexsUpstreamLimiter = limiter;
+const barcodeBLimiter: LimiterState = globalThis.__nexsBarcodeBLimiter ?? { active: 0, queue: [], max: 300 };
+globalThis.__nexsBarcodeBLimiter = barcodeBLimiter;
 const MAX_QUEUE = Number.isFinite(configuredQueueLimit)
   ? Math.max(20, Math.min(2_000, Math.trunc(configuredQueueLimit)))
   : 200;
@@ -63,39 +66,39 @@ export function operationalHeaders(facility?: string, workstation?: string): Rec
   };
 }
 
-async function upstreamPermit(waitMs = 30_000): Promise<() => void> {
+async function upstreamPermit(waitMs = 30_000, pool = limiter): Promise<() => void> {
   const releaseFactory = () => {
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      const next = limiter.queue.shift();
+      const next = pool.queue.shift();
       if (next) {
         clearTimeout(next.timer);
         next.resolve(releaseFactory());
       } else {
-        limiter.active = Math.max(0, limiter.active - 1);
+        pool.active = Math.max(0, pool.active - 1);
       }
     };
   };
 
-  if (limiter.active < limiter.max) {
-    limiter.active += 1;
+  if (pool.active < pool.max) {
+    pool.active += 1;
     return releaseFactory();
   }
 
-  if (limiter.queue.length >= MAX_QUEUE) {
+  if (pool.queue.length >= MAX_QUEUE) {
     throw new Error("The NexS request queue is full. Please retry shortly.");
   }
 
   return new Promise<() => void>((resolve, reject) => {
     const ticket = { resolve, reject, timer: undefined as unknown as ReturnType<typeof setTimeout> };
     ticket.timer = setTimeout(() => {
-      const index = limiter.queue.indexOf(ticket);
-      if (index >= 0) limiter.queue.splice(index, 1);
+      const index = pool.queue.indexOf(ticket);
+      if (index >= 0) pool.queue.splice(index, 1);
       reject(new Error("The NexS request queue is busy. Please retry shortly."));
     }, waitMs);
-    limiter.queue.push(ticket);
+    pool.queue.push(ticket);
   });
 }
 
@@ -129,8 +132,8 @@ async function responseText(response: Response): Promise<string> {
   }
 }
 
-export async function fetchJson<T>(url: string, init: RequestInit = {}, timeoutMs = 20_000): Promise<T> {
-  const release = await upstreamPermit();
+export async function fetchJson<T>(url: string, init: RequestInit = {}, timeoutMs = 20_000, lane?: "barcode-b"): Promise<T> {
+  const release = await upstreamPermit(30_000, lane === "barcode-b" ? barcodeBLimiter : limiter);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {

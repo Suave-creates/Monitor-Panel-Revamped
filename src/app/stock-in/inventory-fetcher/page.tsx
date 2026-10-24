@@ -216,7 +216,7 @@ export default function InventoryFetcherPage() {
         <div>
           <div className="eyebrow">Stock in · product inventory</div>
           <h1>Inventory fetcher</h1>
-          <p className="lede">Combine consolidated warehouse quantities with six-hour product catalog metadata for up to 100 PIDs.</p>
+          <p className="lede">Combine consolidated warehouse quantities with six-hour product catalog metadata for up to 25,000 PIDs.</p>
         </div>
         <span className="badge good"><Boxes size={12} /> Live NexS inventory</span>
       </div>
@@ -233,7 +233,7 @@ export default function InventoryFetcherPage() {
               placeholder={"220624\n223354\n241005"}
               value={rawInput}
             />
-            <span className="dim mono" style={{ fontSize: 10 }}>{pids.length} unique · 4–12 digits · maximum 100</span>
+            <span className="dim mono" style={{ fontSize: 10 }}>{pids.length} unique · 4–12 digits · maximum 25,000</span>
           </div>
 
           <div className="form-grid">
@@ -249,7 +249,7 @@ export default function InventoryFetcherPage() {
 
           <input ref={fileRef} hidden type="file" accept=".txt,.csv,.xls,.xlsx" onChange={readFile} />
           <div className="toolbar">
-            <button className="button primary" disabled={!pids.length || pids.length > 100 || loading} onClick={() => lookup(false)} type="button">
+            <button className="button primary" disabled={!pids.length || pids.length > 25_000 || loading} onClick={() => lookup(false)} type="button">
               {loading ? <span className="spinner" /> : <Search size={14} />} {loading ? `Fetching ${pids.length}…` : "Fetch inventory"}
             </button>
             <button className="button" disabled={loading} onClick={() => fileRef.current?.click()} type="button"><FileUp size={14} /> Import</button>

@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      secrets:
+        - npm_ca
     image: nexs-operations-console:local
     init: true
     restart: unless-stopped
@@ -13,6 +15,10 @@ services:
       NODE_ENV: production
       PORT: 3000
       HOSTNAME: 0.0.0.0
+      NODE_EXTRA_CA_CERTS: /run/secrets/nexs_ca.crt
+    secrets:
+      - source: npm_ca
+        target: nexs_ca.crt
     read_only: true
     tmpfs:
       - /tmp
@@ -26,3 +32,7 @@ services:
       timeout: 5s
       start_period: 20s
       retries: 3
+
+secrets:
+  npm_ca:
+    file: ${NODE_EXTRA_CA_CERTS:?NODE_EXTRA_CA_CERTS must point to the corporate CA certificate}

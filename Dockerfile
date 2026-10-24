@@ -3,7 +3,8 @@
 FROM node:24-alpine AS dependencies
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN --mount=type=secret,id=npm_ca,required=true \
+    NODE_EXTRA_CA_CERTS=/run/secrets/npm_ca npm ci
 
 FROM node:24-alpine AS builder
 WORKDIR /app

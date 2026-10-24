@@ -532,7 +532,7 @@ export default function DoOrderVisibilityPage() {
         <div>
           <div className="eyebrow">Packing &amp; dispatch · {data?.configuration.facility || "NXS1"}</div>
           <h1>DO Order Visibility</h1>
-          <p className="lede">Active BULKTOVENDOR shipments, aging pressure and PID-level picking impact across the latest seven calendar days.</p>
+          <p className="lede">Active BULKTOVENDOR shipments, aging pressure and PID-level picking impact across the latest 30 calendar days.</p>
         </div>
         <div className="toolbar">
           <span className="badge info"><span className="live-dot" /> {data?.configuration.channel || "BULKTOVENDOR"}</span>

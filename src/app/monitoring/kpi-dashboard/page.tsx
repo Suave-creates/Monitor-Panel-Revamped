@@ -22,6 +22,7 @@ type GaugeData = {
   sublabel: string;
   day: string;
   mode: OrderMode;
+  priority: 1 | 2 | null;
   target: number;
   denominator: number | null;
   open: number;
@@ -38,6 +39,7 @@ type GaugeData = {
 type DashboardData = {
   facility: Facility;
   mode: OrderMode;
+  p2Only: boolean;
   generatedAt: string;
   gauges: GaugeData[];
   infocorner: {
@@ -111,6 +113,7 @@ function safeName(value: string): string {
 export default function KpiDashboardPage() {
   const [facility, setFacility] = useState<Facility>("NXS1");
   const [mode, setMode] = useState<OrderMode>("njit");
+  const [p2Only, setP2Only] = useState(false);
   const [includeNdd, setIncludeNdd] = useState(false);
   const [refreshSec, setRefreshSec] = useState(60);
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
@@ -130,7 +133,7 @@ export default function KpiDashboardPage() {
       const response = await fetch("/api/monitoring/kpi-dashboard", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "dashboard", facility, mode, includeNdd, force }),
+        body: JSON.stringify({ action: "dashboard", facility, mode, p2Only, includeNdd, force }),
       });
       const payload = await response.json() as DashboardEnvelope | ErrorEnvelope;
       if (!response.ok || payload.ok !== true) {
@@ -150,7 +153,7 @@ export default function KpiDashboardPage() {
         setRefreshing(false);
       }
     }
-  }, [facility, mode, includeNdd]);
+  }, [facility, mode, p2Only, includeNdd]);
 
   useEffect(() => {
     // This effect intentionally synchronizes the selected controls with server data.
@@ -179,6 +182,7 @@ export default function KpiDashboardPage() {
           gauge: gauge.key,
           day: gauge.day,
           stage,
+          p2Only: gauge.priority === 2,
         }),
       });
       const payload = await response.json() as DetailEnvelope | ErrorEnvelope;
@@ -188,7 +192,7 @@ export default function KpiDashboardPage() {
       if (!payload.data.rows.length) throw new Error(`No detail rows were returned for ${stage}.`);
       downloadCsv(
         payload.data.rows,
-        `${facility}_${gauge.key.toUpperCase()}_${safeName(stage)}_${gauge.day}.csv`,
+        `${facility}_${gauge.key.toUpperCase()}${gauge.priority === 2 ? "_P2" : ""}_${safeName(stage)}_${gauge.day}.csv`,
       );
       if (payload.data.truncated) {
         setError(`The ${stage} export reached the safety row limit for at least one FR tag.`);
@@ -238,6 +242,13 @@ export default function KpiDashboardPage() {
             </div>
           </div>
           <div className="field">
+            <span className="label">D1 / D2 priority</span>
+            <div className="tabs" role="group" aria-label="D1 and D2 priority filter">
+              <button className={`tab ${!p2Only ? "active" : ""}`} type="button" onClick={() => setP2Only(false)}>All</button>
+              <button className={`tab ${p2Only ? "active" : ""}`} type="button" onClick={() => setP2Only(true)}>P2</button>
+            </div>
+          </div>
+          <div className="field">
             <span className="label">NDD gauge</span>
             <div className="tabs" role="group" aria-label="NDD gauge visibility">
               <button className={`tab ${includeNdd ? "active" : ""}`} type="button" onClick={() => setIncludeNdd(true)}>Show</button>
@@ -262,7 +273,7 @@ export default function KpiDashboardPage() {
           </div>
         </div>
         <p className="dim mono" style={{ margin: "12px 0 0", fontSize: 10 }}>
-          NDD remains NJIT priority 1 and is optional. D1/D2 sum FR1+FR2, NDD (when shown) sums every FR tag, and Ready to Ship is excluded from remaining work.
+          P2 filters D1/D2 and uses the matching P2 infocorner denominator. NDD remains NJIT priority 1 and is optional. NJIT D1/D2 sum FR1+FR2; JIT and NDD sum their returned FR tags. Ready to Ship is excluded from remaining work.
         </p>
       </section>
 
@@ -295,7 +306,10 @@ export default function KpiDashboardPage() {
                     <div>
                       <div className="eyebrow" style={{ color: tone }}>{gauge.label}</div>
                       <h2>{gauge.sublabel}</h2>
-                      <span className="dim mono" style={{ fontSize: 10 }}>{dayLabel(gauge.day)} · {gauge.mode.toUpperCase()}</span>
+                      <span className="dim mono" style={{ fontSize: 10 }}>
+                        {dayLabel(gauge.day)} · {gauge.mode.toUpperCase()}
+                        {gauge.priority ? ` · P${gauge.priority}` : ""}
+                      </span>
                     </div>
                     <span className={`badge ${gauge.frFound ? "good" : "bad"}`}>{gauge.frTag}</span>
                   </div>
@@ -317,7 +331,7 @@ export default function KpiDashboardPage() {
                   <div className="grid grid-3" style={{ gap: 8 }}>
                     <div><span className="label">Open</span><div className="mono" style={{ marginTop: 5 }}>{numberText(gauge.open)}</div></div>
                     <div><span className="label">Ready to ship</span><div className="mono" style={{ marginTop: 5 }}>{numberText(gauge.readyToShip)}</div></div>
-                    <div><span className="label">Day volume</span><div className="mono" style={{ marginTop: 5 }}>{numberText(gauge.denominator)}</div></div>
+                    <div><span className="label">{gauge.priority === 2 ? "P2 day volume" : "Day volume"}</span><div className="mono" style={{ marginTop: 5 }}>{numberText(gauge.denominator)}</div></div>
                   </div>
                   <p className="dim mono" style={{ margin: "13px 0 0", fontSize: 9 }}>{reportTime(gauge.reportAsOn)}</p>
                 </article>

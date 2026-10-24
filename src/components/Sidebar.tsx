@@ -33,6 +33,7 @@ const groups = [
     items: [
       { href: "/stock-in/inventory-fetcher", label: "Inventory", icon: Boxes },
       { href: "/stock-in/barcode-intelligence", label: "Barcodes", icon: ScanBarcode },
+      { href: "/stock-in/barcode-b", label: "Barcode B", icon: ScanBarcode },
       { href: "/stock-in/invoice-bulk", label: "Invoices", icon: ReceiptText },
     ],
   },

@@ -15,9 +15,8 @@ export const dynamic = "force-dynamic";
 const FACILITY = process.env.NEXS_FACILITY || "NXS1";
 const CHANNEL = "BULKTOVENDOR";
 const TIME_ZONE = "Asia/Kolkata";
-const LOOKBACK_DAYS = 7;
+const LOOKBACK_DAYS = 30;
 const PAGE_SIZE = 500;
-const MAX_PAGES = 10;
 const DETAIL_CONCURRENCY = 5;
 const CATALOG_CONCURRENCY = 5;
 const META_CONCURRENCY = 3;
@@ -255,7 +254,10 @@ function parseShipmentPage(payload: unknown): {
   invalid: number;
 } {
   const data = asRecord(asRecord(payload)?.data);
-  const source = Array.isArray(data?.doOrderResponses) ? data.doOrderResponses : [];
+  if (!Array.isArray(data?.doOrderResponses)) {
+    throw new Error("The shipment page payload was invalid.");
+  }
+  const source = data.doOrderResponses;
   const shipments: RawShipment[] = [];
   let invalid = 0;
 
@@ -293,61 +295,49 @@ async function fetchShipments(
 }> {
   const unique = new Map<string, RawShipment>();
   let apiReportedTotal: number | null = null;
-  let offset = 0;
+  let received = 0;
   let validReceived = 0;
   let invalidReceived = 0;
-  let moreExpected = false;
 
-  for (let page = 0; page < MAX_PAGES; page += 1) {
+  for (let page = 0; ; page += 1) {
     const url = endpoint(ENDPOINTS.shipments);
     url.searchParams.set("sortKey", "created_at");
     url.searchParams.set("sortOrder", "DESC");
     url.searchParams.set("channel", CHANNEL);
     url.searchParams.set("created_at_from", `${from} 00:00:00`);
     url.searchParams.set("created_at_to", `${to} 23:59:59`);
-    url.searchParams.set("offset", String(offset));
+    // NexS uses a zero-based page number, not a row offset. A page can
+    // contain fewer than PAGE_SIZE rows even when another page exists.
+    url.searchParams.set("offset", String(page));
     url.searchParams.set("pageSize", String(PAGE_SIZE));
 
-    let parsed: ReturnType<typeof parseShipmentPage>;
-    try {
-      parsed = parseShipmentPage(await getNexsJson(request, url, APP_IDS.shipments));
-    } catch (error) {
-      if (page === 0) throw error;
-      warnings.push({
-        code: "SHIPMENT_PAGE_FAILED",
-        message: "A later shipment page could not be loaded; the dashboard contains a partial list.",
-      });
-      moreExpected = false;
-      break;
-    }
+    // Failed pages must fail the load rather than cache an incomplete list.
+    const parsed = parseShipmentPage(await getNexsJson(request, url, APP_IDS.shipments));
 
     if (apiReportedTotal === null && parsed.total !== null) apiReportedTotal = parsed.total;
     invalidReceived += parsed.invalid;
     validReceived += parsed.shipments.length;
+    const previousSize = unique.size;
     parsed.shipments.forEach((shipment) => unique.set(shipment.id, shipment));
-    offset += parsed.received;
+    received += parsed.received;
 
     if (parsed.received === 0) {
-      moreExpected = false;
+      if (apiReportedTotal !== null && received < apiReportedTotal) {
+        throw new Error("Shipment pagination ended before all records were loaded.");
+      }
       break;
     }
-    if (apiReportedTotal !== null && offset >= apiReportedTotal) {
-      moreExpected = false;
+    if (apiReportedTotal !== null && received >= apiReportedTotal) {
       break;
+    }
+    if (unique.size === previousSize) {
+      throw new Error("Shipment pagination returned no new records.");
     }
     if (apiReportedTotal === null && parsed.received < PAGE_SIZE) {
-      moreExpected = false;
       break;
     }
-    moreExpected = true;
   }
 
-  if (moreExpected) {
-    warnings.push({
-      code: "SHIPMENT_PAGE_LIMIT",
-      message: `The ${(MAX_PAGES * PAGE_SIZE).toLocaleString("en-IN")} shipment safety limit was reached; newer configuration may be required.`,
-    });
-  }
   if (invalidReceived > 0) {
     warnings.push({
       code: "INVALID_SHIPMENTS",
@@ -858,7 +848,7 @@ async function serveDashboard(request: Request, refresh: boolean): Promise<NextR
   const today = dateKeyInTimeZone(new Date());
   const from = shiftDateKey(today, -(LOOKBACK_DAYS - 1));
   const key = cacheKey("do-order-visibility:dashboard", {
-    version: 2,
+    version: 3,
     facility: FACILITY,
     channel: CHANNEL,
     from,
