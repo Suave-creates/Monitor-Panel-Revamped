@@ -78,6 +78,13 @@ export type GroupedOrder = {
   itemCount: number;
 };
 
+/** NexS monitor-panel order category — the Delay Dashboard's global
+ *  Fulfillable / UNF switch. Every report sends it as `category`. */
+export type OrderCategory = "FULFILLABLE_ORDERS" | "UNFULFILLABLE_ORDERS";
+export function parseOrderCategory(value: unknown): OrderCategory {
+  return value === "UNFULFILLABLE_ORDERS" ? value : "FULFILLABLE_ORDERS";
+}
+
 export type StageKey = "QC" | "FITTING" | "MEI";
 
 export type StageConfig = {
@@ -262,6 +269,12 @@ export function health(st: { total: number; g1: number; g2: number; g3: number }
 
 export type DateRange = { startValue: string; endValue: string };
 export type International = "all" | "intl" | "nonintl";
+/** Global picking-priority filter: P1 = NDD, P2, both, or every order. */
+export type Priority = "p1" | "p2" | "all";
+const PRIORITY_VALUES: Record<Priority, number[]> = { p1: [1], p2: [2], all: [] };
+export function pickingPriorityFor(priority: Priority): number[] {
+  return PRIORITY_VALUES[priority];
+}
 
 export function buildMonitoringBody(
   apiStatus: string,
@@ -269,14 +282,14 @@ export function buildMonitoringBody(
     page: number;
     category: string;
     frTag: string;
-    nddOnly: boolean;
+    priority: Priority;
     dateRange?: DateRange;
     pageSize?: number;
     qcFailFilter?: boolean;
     international?: International;
   },
 ): RawRow {
-  const { page, category, frTag, nddOnly, dateRange, pageSize = 500, qcFailFilter = false, international = "all" } = opts;
+  const { page, category, frTag, priority, dateRange, pageSize = 500, qcFailFilter = false, international = "all" } = opts;
   const binaryFilter: RawRow = {};
   if (international === "intl") binaryFilter.isInternationalOrder = true;
   else if (international === "nonintl") binaryFilter.isInternationalOrder = false;
@@ -297,7 +310,7 @@ export function buildMonitoringBody(
         date: dateRange || { startValue: "", endValue: "" },
       },
       multiSelectFilters: {
-        pickingPriority: nddOnly ? [1] : [],
+        pickingPriority: pickingPriorityFor(priority),
         qcStatus: qcFailFilter ? ["Fail"] : [],
         itemType: [],
         orderChannel: [],

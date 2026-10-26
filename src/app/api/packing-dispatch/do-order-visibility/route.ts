@@ -23,7 +23,7 @@ const META_CONCURRENCY = 3;
 const FULL_CACHE_TTL_MS = 15 * 60_000;
 const SHIPMENT_DETAIL_CACHE_TTL_MS = 15 * 60_000;
 const CATALOG_CACHE_TTL_MS = 6 * 60 * 60 * 1_000;
-const NEXS_TIMEOUT_MS = 20_000;
+const NEXS_TIMEOUT_MS = 30_000;
 
 const APP_IDS = {
   shipments: process.env.NEXS_SCRIPTS_APP_ID || process.env.NEXS_APP_ID || "nexs-analytics",
@@ -63,6 +63,7 @@ type RawShipment = {
   id: string;
   status: string;
   createdAt: string | null;
+  updatedAt: string | null;
 };
 
 type RawPid = {
@@ -119,6 +120,8 @@ type ShipmentRow = {
   pidCount: number;
   createdAt: string | null;
   ageHours: number | null;
+  updatedAt: string | null;
+  sinceUpdateHours: number | null;
   classifications: string[];
   pidDetails: PidDetail[];
 };
@@ -272,6 +275,7 @@ function parseShipmentPage(payload: unknown): {
       id,
       status: normalizeStatus(row.status),
       createdAt: textValue(row.createdAt) || null,
+      updatedAt: textValue(row.updatedAt) || null,
     });
   }
 
@@ -512,16 +516,8 @@ async function fetchDoMetadata(
   return result;
 }
 
-function classifyHsn(rawClassification: string, hsnCode: string): string {
+function classifyHsn(rawClassification: string): string {
   const raw = rawClassification.trim();
-  const normalized = raw.toLowerCase();
-  if (normalized.includes("prescription") && normalized.includes("blank")) return "Prescription Blank";
-  if (normalized.includes("solution") || normalized.includes("care")) return "Contact Lens Solution";
-  if (normalized.includes("contact")) return "Contact Lens";
-  if (normalized.includes("frame")) return "Eyeframe";
-  if (hsnCode.startsWith("900130")) return "Contact Lens";
-  if (hsnCode.startsWith("9003")) return "Eyeframe";
-  if (hsnCode.startsWith("3307") || hsnCode.startsWith("3808")) return "Contact Lens Solution";
   if (!raw) return "Unknown";
   return raw
     .replace(/[-_]+/g, " ")
@@ -536,7 +532,7 @@ function parseCatalog(payload: unknown): CatalogInfo {
   return {
     hsnClassification,
     hsnCode,
-    classification: classifyHsn(hsnClassification, hsnCode),
+    classification: classifyHsn(hsnClassification),
   };
 }
 
@@ -695,6 +691,9 @@ function consolidate(
       pidCount: validPidCount,
       createdAt: source.createdAt,
       ageHours: ageHours(source.createdAt, nowMs),
+      // The channel list's own updatedAt — moves on status changes, not on picking scans.
+      updatedAt: source.updatedAt,
+      sinceUpdateHours: ageHours(source.updatedAt, nowMs),
       classifications: [...new Set(pidDetails.map((pid) => pid.classification))].sort(),
       pidDetails,
     });
@@ -848,7 +847,7 @@ async function serveDashboard(request: Request, refresh: boolean): Promise<NextR
   const today = dateKeyInTimeZone(new Date());
   const from = shiftDateKey(today, -(LOOKBACK_DAYS - 1));
   const key = cacheKey("do-order-visibility:dashboard", {
-    version: 3,
+    version: 4,
     facility: FACILITY,
     channel: CHANNEL,
     from,

@@ -48,6 +48,8 @@ type ShipmentRow = {
   pidCount: number;
   createdAt: string | null;
   ageHours: number | null;
+  updatedAt: string | null;
+  sinceUpdateHours: number | null;
   classifications: string[];
   pidDetails: PidDetail[];
 };
@@ -177,6 +179,42 @@ function statusTone(status: string): Tone {
   return "blue";
 }
 
+/** "Last update" filter — shipments whose status has not changed for at least N hours
+ *  (NexS updatedAt moves on status changes, not on individual picking scans). */
+const STALE_OPTIONS = [
+  { key: "ALL", label: "Any time", minHours: 0 },
+  { key: "6", label: "> 6 hrs", minHours: 6 },
+  { key: "12", label: "> 12 hrs", minHours: 12 },
+  { key: "24", label: "> 24 hrs", minHours: 24 },
+  { key: "48", label: "> 48 hrs", minHours: 48 },
+] as const;
+type StaleKey = (typeof STALE_OPTIONS)[number]["key"];
+type AgingBasis = "created" | "updated";
+
+const UPDATED_FORMAT = new Intl.DateTimeFormat("en-IN", {
+  timeZone: "Asia/Kolkata",
+  day: "2-digit",
+  month: "short",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: true,
+});
+
+function formatUpdatedAt(value: string | null): string {
+  if (!value) return "";
+  const normalized = value.trim().replace(" ", "T");
+  const ms = Date.parse(/(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(normalized) ? normalized : `${normalized}+05:30`);
+  return Number.isFinite(ms) ? UPDATED_FORMAT.format(new Date(ms)) : value;
+}
+
+/** Since-last-update tone — tighter than order age: idle 6h+ is a warning, 24h+ is stuck. */
+function staleBadge(hours: number | null): string {
+  if (hours === null) return "badge";
+  if (hours < 6) return "badge good";
+  if (hours < 24) return "badge warn";
+  return "badge bad";
+}
+
 function ageBadge(hours: number | null): string {
   if (hours === null) return "badge";
   if (hours < 24) return "badge good";
@@ -265,11 +303,12 @@ function Completion({ picked, required }: { picked: number; required: number }) 
   );
 }
 
-function AgingMatrix({ rows }: { rows: ShipmentRow[] }) {
+function AgingMatrix({ rows, basis }: { rows: ShipmentRow[]; basis: AgingBasis }) {
+  const hoursOf = (row: ShipmentRow) => (basis === "updated" ? row.sinceUpdateHours : row.ageHours);
   const statusCounts = new Map<string, number>();
   rows.forEach((row) => statusCounts.set(row.status, (statusCounts.get(row.status) || 0) + 1));
   const statuses = [...statusCounts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([status]) => status);
-  const unknownAge = rows.filter((row) => row.ageHours === null);
+  const unknownAge = rows.filter((row) => hoursOf(row) === null);
   const buckets = unknownAge.length > 0
     ? [...AGING_BUCKETS, { label: "Unknown", tone: "blue" as Tone, matches: Number.isNaN }]
     : AGING_BUCKETS;
@@ -279,7 +318,7 @@ function AgingMatrix({ rows }: { rows: ShipmentRow[] }) {
       <table aria-label="Shipment aging by status" style={{ minWidth: Math.max(520, 180 + statuses.length * 130) }}>
         <thead>
           <tr>
-            <th scope="col">Age bucket</th>
+            <th scope="col">{basis === "updated" ? "Since last update" : "Age bucket"}</th>
             {statuses.map((status) => <th scope="col" className="right" key={status}>{formatStatus(status)}</th>)}
             <th scope="col" className="right">Total</th>
           </tr>
@@ -288,7 +327,7 @@ function AgingMatrix({ rows }: { rows: ShipmentRow[] }) {
           {buckets.map((bucket) => {
             const bucketRows = bucket.label === "Unknown"
               ? unknownAge
-              : rows.filter((row) => row.ageHours !== null && bucket.matches(row.ageHours));
+              : rows.filter((row) => { const h = hoursOf(row); return h !== null && bucket.matches(h); });
             return (
               <tr key={bucket.label}>
                 <td><span className={bucket.tone}>{bucket.label}</span></td>
@@ -346,6 +385,9 @@ export default function DoOrderVisibilityPage() {
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<ViewName>("shipments");
   const [doTypeFilter, setDoTypeFilter] = useState("ALL");
+  const [staleFilter, setStaleFilter] = useState<StaleKey>("ALL");
+  const [sortByStale, setSortByStale] = useState(false);
+  const [agingBasis, setAgingBasis] = useState<AgingBasis>("created");
   const [classFilter, setClassFilter] = useState<Set<string>>(() => new Set());
   const [expandedShipments, setExpandedShipments] = useState<Set<string>>(() => new Set());
 
@@ -435,11 +477,27 @@ export default function DoOrderVisibilityPage() {
     ? doTypeFilter
     : "ALL";
 
-  const visibleShipments = useMemo(() => {
+  const doTypeScopedShipments = useMemo(() => {
     if (effectiveDoTypeFilter === "ALL") return classScopedShipments;
     if (effectiveDoTypeFilter === UNKNOWN_DO_TYPE) return classScopedShipments.filter((shipment) => shipment.doType === "—");
     return classScopedShipments.filter((shipment) => shipment.doType === effectiveDoTypeFilter);
   }, [classScopedShipments, effectiveDoTypeFilter]);
+
+  const staleCounts = useMemo(() => new Map(STALE_OPTIONS.map((option) => [
+    option.key,
+    option.minHours === 0
+      ? doTypeScopedShipments.length
+      : doTypeScopedShipments.filter((shipment) => (shipment.sinceUpdateHours ?? -1) >= option.minHours).length,
+  ])), [doTypeScopedShipments]);
+
+  const visibleShipments = useMemo(() => {
+    const minHours = STALE_OPTIONS.find((option) => option.key === staleFilter)?.minHours ?? 0;
+    const scoped = minHours === 0
+      ? doTypeScopedShipments
+      : doTypeScopedShipments.filter((shipment) => (shipment.sinceUpdateHours ?? -1) >= minHours);
+    if (!sortByStale) return scoped;
+    return [...scoped].sort((a, b) => (b.sinceUpdateHours ?? -1) - (a.sinceUpdateHours ?? -1) || a.id.localeCompare(b.id));
+  }, [doTypeScopedShipments, staleFilter, sortByStale]);
 
   const statusMetrics = useMemo(() => {
     const counts = new Map<string, number>();
@@ -484,7 +542,7 @@ export default function DoOrderVisibilityPage() {
     if (visibleShipments.length === 0) return;
     downloadCsv(`DO_Shipments_${exportTimestamp()}.csv`, [
       "Shipping ID", "Status", "Customer", "DO Number", "PO Number", "DO Type",
-      "Required", "Picked", "Pending", "PID Count", "Age (hrs)", "Completed (%)",
+      "Required", "Picked", "Pending", "PID Count", "Age (hrs)", "Last Updated At", "Since Update (hrs)", "Completed (%)",
     ], visibleShipments.map((shipment) => [
       shipment.id,
       shipment.status,
@@ -497,6 +555,8 @@ export default function DoOrderVisibilityPage() {
       shipment.pending,
       shipment.pidCount,
       shipment.ageHours === null ? "" : shipment.ageHours.toFixed(2),
+      shipment.updatedAt || "",
+      shipment.sinceUpdateHours === null ? "" : shipment.sinceUpdateHours.toFixed(2),
       percentage(shipment.picked, shipment.required) ?? "",
     ]));
   }
@@ -670,11 +730,18 @@ export default function DoOrderVisibilityPage() {
                 <div className="card-header">
                   <div>
                     <div className="card-title"><Clock3 size={15} className="amber" /> Shipment aging by status</div>
-                    <div className="card-subtitle">Current classification and DO-type scope</div>
+                    <div className="card-subtitle">Current classification, DO-type and last-update scope</div>
                   </div>
-                  <span className="badge">{visibleShipments.length} visible</span>
+                  <div className="toolbar">
+                    <div className="tabs">
+                      <button type="button" className={`tab${agingBasis === "created" ? " active" : ""}`} onClick={() => setAgingBasis("created")}>By created</button>
+                      <button type="button" className={`tab${agingBasis === "updated" ? " active" : ""}`} onClick={() => setAgingBasis("updated")}
+                        title="Bucket shipments by time since their last status change in NexS (picking scans alone do not count)">By last update</button>
+                    </div>
+                    <span className="badge">{visibleShipments.length} visible</span>
+                  </div>
                 </div>
-                <AgingMatrix rows={visibleShipments} />
+                <AgingMatrix rows={visibleShipments} basis={agingBasis} />
               </section>
 
               <section className="card">
@@ -713,9 +780,31 @@ export default function DoOrderVisibilityPage() {
                       </button>
                     )}
                   </div>
+                  <div className="card-subtitle" style={{ margin: "12px 0 9px" }}>Last status update — no status change in NexS for</div>
+                  <div className="filter-strip">
+                    {STALE_OPTIONS.map((option) => (
+                      <button
+                        className={`filter-pill ${staleFilter === option.key ? "active" : ""}`}
+                        type="button"
+                        onClick={() => setStaleFilter(option.key)}
+                        key={option.key}
+                      >
+                        {option.label} <span className="mono">{staleCounts.get(option.key) ?? 0}</span>
+                      </button>
+                    ))}
+                    <button
+                      className={`filter-pill ${sortByStale ? "active" : ""}`}
+                      type="button"
+                      aria-pressed={sortByStale}
+                      onClick={() => setSortByStale((current) => !current)}
+                      title="Sort the table so shipments idle the longest come first"
+                    >
+                      ↓ Oldest update first
+                    </button>
+                  </div>
                 </div>
                 <div className="table-wrap" style={{ maxHeight: 510 }}>
-                  <table aria-label="All active shipments" style={{ minWidth: 1_330 }}>
+                  <table aria-label="All active shipments" style={{ minWidth: 1_460 }}>
                     <thead>
                       <tr>
                         <th scope="col">Shipping ID</th>
@@ -729,6 +818,7 @@ export default function DoOrderVisibilityPage() {
                         <th scope="col" className="right">Pending</th>
                         <th scope="col" className="right">PIDs</th>
                         <th scope="col">Age</th>
+                        <th scope="col">Last update</th>
                         <th scope="col" className="right">Completed</th>
                       </tr>
                     </thead>
@@ -762,11 +852,15 @@ export default function DoOrderVisibilityPage() {
                                 ) : <span className="dim">0</span>}
                               </td>
                               <td><span className={ageBadge(shipment.ageHours)}>{formatAge(shipment.ageHours)}</span></td>
+                              <td title={shipment.updatedAt ? `Status last changed ${formatUpdatedAt(shipment.updatedAt)} IST — picking scans alone do not update this` : "No update time from NexS"}>
+                                <span className={staleBadge(shipment.sinceUpdateHours)}>{shipment.sinceUpdateHours === null ? "Unknown" : `${formatAge(shipment.sinceUpdateHours)} ago`}</span>
+                                {shipment.updatedAt && <span className="dim mono" style={{ fontSize: 10, marginLeft: 6 }}>{formatUpdatedAt(shipment.updatedAt)}</span>}
+                              </td>
                               <td className="right"><Completion picked={shipment.picked} required={shipment.required} /></td>
                             </tr>
                             {expanded && (
                               <tr>
-                                <td colSpan={12} style={{ padding: 0, background: "var(--bg-soft)" }}>
+                                <td colSpan={13} style={{ padding: 0, background: "var(--bg-soft)" }}>
                                   <div className="table-wrap" style={{ padding: "8px 18px 13px 42px" }}>
                                     <table aria-label={`PID detail for shipment ${shipment.id}`}>
                                       <thead>
@@ -799,7 +893,7 @@ export default function DoOrderVisibilityPage() {
                           </Fragment>
                         );
                       }) : (
-                        <tr><td className="table-empty" colSpan={12}>No active shipments match the current filters.</td></tr>
+                        <tr><td className="table-empty" colSpan={13}>No active shipments match the current filters.</td></tr>
                       )}
                     </tbody>
                   </table>

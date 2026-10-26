@@ -45,7 +45,7 @@ async function callDelayDashboard<T>(body: Record<string, unknown>): Promise<T> 
  *  — see src/app/delay-dashboard/page.tsx's initial useState values — so
  *  the logged snapshot matches what a shift lead sees on a fresh page load. */
 async function captureFacility(facility: typeof FACILITIES[number], day: string, hour: number): Promise<void> {
-  const base = { facility, nddOnly: true, jit: "all", frFilter: "all", international: "all" };
+  const base = { facility, priority: "p1", jit: "all", frFilter: "all", international: "all" };
   const [report, qcfail, warehouse, packingDispatch] = await Promise.all([
     callDelayDashboard<ReportData>({ action: "report", ...base, frameFilter: "all" }),
     callDelayDashboard<QcfailData>({ action: "qcfail", ...base }),

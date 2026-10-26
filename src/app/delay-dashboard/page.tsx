@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Building2, Gauge, Globe, Glasses, Layers, RefreshCw, Repeat, Settings, Tag, Timer, Zap } from "lucide-react";
 
 import ReportView from "./components/ReportView";
@@ -11,9 +11,12 @@ import DispatchReportView from "./components/DispatchReportView";
 import DispatchDrilldownView from "./components/DispatchDrilldownView";
 import ClReportView from "./components/ClReportView";
 import ClDrilldownView from "./components/ClDrilldownView";
+import Fr0BulkReportView from "./components/Fr0BulkReportView";
+import Fr0BulkDrilldownView from "./components/Fr0BulkDrilldownView";
 import { DEFAULT_BUCKETS, DEPT_META, DEPT_ORDER, type AgingItem, type BucketDef, type DeptKey } from "./lib/aggregate";
 import * as Dispatch from "./lib/dispatchAggregate";
 import * as ClR from "./lib/clAggregate";
+import * as Fr0B from "./lib/fr0BulkAggregate";
 import { buildPidSets, type LensTypeFilter, type PidSets } from "./lib/pidClassify";
 import {
   dateBounds,
@@ -25,6 +28,7 @@ import {
   type FrFilter,
   type FrameFilter,
   type International,
+  type Priority,
   type Jit,
   type PipelineData,
   type QcfailData,
@@ -39,6 +43,12 @@ const DISPATCH_BUCKETS_STORAGE_KEY = "delay-dashboard.dispatchBuckets.v1";
 const DISPATCH_DEPT_VIEW_STORAGE_KEY = "delay-dashboard.dispatchDeptView.v1";
 const CL_BUCKETS_STORAGE_KEY = "delay-dashboard.clBuckets.v1";
 const CL_VIEW_MODE_STORAGE_KEY = "delay-dashboard.clViewMode.v1";
+const FR0B_BUCKETS_STORAGE_KEY = "delay-dashboard.fr0BulkBuckets.v1";
+const FR0B_VIEW_MODE_STORAGE_KEY = "delay-dashboard.fr0BulkViewMode.v1";
+/** Global NexS order category — every report fetches from the selected one. */
+type OrderCategory = "FULFILLABLE_ORDERS" | "UNFULFILLABLE_ORDERS";
+const ORDER_CATEGORY_STORAGE_KEY = "delay-dashboard.orderCategory.v1";
+
 const EMPTY_PID_SETS: PidSets = { cyl: new Set(), noncyl: new Set() };
 
 const NAV: { view: View; label: string }[] = [
@@ -46,12 +56,16 @@ const NAV: { view: View; label: string }[] = [
   { view: "shiftReport", label: "NDD Shift Report" },
   { view: "dispatch", label: "Dispatch Report" },
   { view: "cl", label: "CL Report" },
+  { view: "fr0Bulk", label: "FR0 Bulk Report" },
   { view: "pidMasters", label: "PID Vault" },
 ];
 
 /** The NDD Shift Report is always P1-only, locked — matching the source
- *  extension's report.html (its own nddOnly is hardcoded true, no toggle). */
+ *  extension's report.html (its own priority is hardcoded true, no toggle). */
 const NDD_ONLY_LOCKED_VIEWS: View[] = ["shiftReport"];
+
+/** CL Report and FR0 Bulk Report have no JIT filter — they always load every order. */
+const NO_JIT_VIEWS: View[] = ["cl", "clDrilldown", "fr0Bulk", "fr0BulkDrilldown"];
 
 function loadBucketsFrom(storageKey: string): Record<DeptKey, BucketDef[]> {
   try {
@@ -97,9 +111,20 @@ function loadClBuckets(): Record<ClR.StageKey, ClR.BucketDef[]> {
     return ClR.DEFAULT_BUCKETS;
   }
 }
+function loadFr0BBuckets(): Record<Fr0B.StageKey, Fr0B.BucketDef[]> {
+  try {
+    const saved = JSON.parse(localStorage.getItem(FR0B_BUCKETS_STORAGE_KEY) || "{}");
+    const out = {} as Record<Fr0B.StageKey, Fr0B.BucketDef[]>;
+    Fr0B.STAGE_ORDER.forEach((stage) => { out[stage] = Array.isArray(saved[stage]) ? saved[stage] : Fr0B.DEFAULT_BUCKETS[stage]; });
+    return out;
+  } catch {
+    return Fr0B.DEFAULT_BUCKETS;
+  }
+}
 type Drilldown = { title: string; subtitle: string; orders: AgingItem[] };
 type DispatchDrilldown = { title: string; subtitle: string; orders: Dispatch.PendencyItem[] };
 type ClDrilldown = { title: string; subtitle: string; orders: ClR.PendencyItem[] };
+type Fr0BDrilldown = { title: string; subtitle: string; orders: Fr0B.PendencyItem[] };
 
 /** The ONE Delay Dashboard panel — a single route with a persistent nav
  *  strip + filter bar (never unmount on view switch) and client-side view
@@ -113,15 +138,19 @@ export default function DelayDashboardPage() {
   const [drilldown, setDrilldown] = useState<Drilldown | null>(null);
   const [dispatchDrilldown, setDispatchDrilldown] = useState<DispatchDrilldown | null>(null);
   const [clDrilldown, setClDrilldown] = useState<ClDrilldown | null>(null);
+  const [fr0bDrilldown, setFr0bDrilldown] = useState<Fr0BDrilldown | null>(null);
 
   const [facility, setFacility] = useState<Facility>("NXS1");
-  const [nddOnly, setNddOnly] = useState(true);
+  const [priority, setPriority] = useState<Priority>("p1");
   const [jit, setJit] = useState<Jit>("all");
   const [frFilter, setFrFilter] = useState<FrFilter>("all");
   const [frameFilter, setFrameFilter] = useState<FrameFilter>("all");
   const [international, setInternational] = useState<International>("all");
   const [lensTypeFilter, setLensTypeFilter] = useState<LensTypeFilter>("all");
   const [autoSec, setAutoSec] = useState(0);
+  const [orderCategory, setOrderCategory] = useState<OrderCategory>("FULFILLABLE_ORDERS");
+  const [unfCount, setUnfCount] = useState<{ total: number; found: boolean } | null>(null);
+  const [unfLoading, setUnfLoading] = useState(false);
 
   const [pidMasters, setPidMasters] = useState<{ updatedAt: string; source: string; cyl: string[]; noncyl: string[] } | null>(null);
   const [pidMastersLoading, setPidMastersLoading] = useState(true);
@@ -174,6 +203,13 @@ export default function DelayDashboardPage() {
   const [clTagFilter, setClTagFilter] = useState<ClR.TagFilter>("all");
   const [clBucketsOpen, setClBucketsOpen] = useState(false);
   const [clViewMode, setClViewMode] = useState<ClR.ViewMode>("order");
+  const [clItemType, setClItemType] = useState<ClR.ItemTypeFilter>("all");
+
+  const [fr0bBuckets, setFr0bBuckets] = useState<Record<Fr0B.StageKey, Fr0B.BucketDef[]>>(Fr0B.DEFAULT_BUCKETS);
+  const [fr0bBucketsOpen, setFr0bBucketsOpen] = useState(false);
+  const [fr0bViewMode, setFr0bViewMode] = useState<Fr0B.ViewMode>("order");
+  const [fr0bTagFilter, setFr0bTagFilter] = useState<Fr0B.TagFilter>("all");
+  const [fr0bItemType, setFr0bItemType] = useState<Fr0B.ItemTypeFilter>("all");
 
   useEffect(() => {
     // This effect intentionally hydrates client-only localStorage preferences after mount.
@@ -184,9 +220,15 @@ export default function DelayDashboardPage() {
     setDispatchBuckets(loadDispatchBuckets());
     setDispatchDeptView(loadDispatchDeptView());
     setClBuckets(loadClBuckets());
+    setFr0bBuckets(loadFr0BBuckets());
+    try {
+      if (localStorage.getItem(ORDER_CATEGORY_STORAGE_KEY) === "UNFULFILLABLE_ORDERS") setOrderCategory("UNFULFILLABLE_ORDERS");
+    } catch { /* ignore */ }
     try {
       const savedViewMode = localStorage.getItem(CL_VIEW_MODE_STORAGE_KEY);
       if (savedViewMode === "order" || savedViewMode === "shipment") setClViewMode(savedViewMode);
+      const savedFr0bViewMode = localStorage.getItem(FR0B_VIEW_MODE_STORAGE_KEY);
+      if (savedFr0bViewMode === "order" || savedFr0bViewMode === "shipment") setFr0bViewMode(savedFr0bViewMode);
     } catch { /* ignore */ }
   }, []);
 
@@ -200,6 +242,9 @@ export default function DelayDashboardPage() {
   const [clData, setClData] = useState<DispatchReportData | null>(null);
   const [clLoading, setClLoading] = useState(false);
   const [clError, setClError] = useState<string | null>(null);
+  const [fr0bData, setFr0bData] = useState<DispatchReportData | null>(null);
+  const [fr0bLoading, setFr0bLoading] = useState(false);
+  const [fr0bError, setFr0bError] = useState<string | null>(null);
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
   const [lastGoodAt, setLastGoodAt] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -222,7 +267,7 @@ export default function DelayDashboardPage() {
     setError(null);
     try {
       const dateRange = dateRangeFor(dateMode, startDate, endDate, startTime, endTime);
-      const base = { facility, nddOnly, jit, frFilter, international, dateRange, force };
+      const base = { facility, priority, jit, frFilter, international, dateRange, category: orderCategory, force };
       const post = (action: string, extra: Record<string, unknown> = {}) =>
         fetch("/api/delay-dashboard", {
           method: "POST",
@@ -253,7 +298,7 @@ export default function DelayDashboardPage() {
     } finally {
       if (sequence === requestSequence.current) setLoading(false);
     }
-  }, [facility, nddOnly, jit, frFilter, frameFilter, international, dateMode, startDate, endDate, startTime, endTime]);
+  }, [facility, priority, jit, frFilter, frameFilter, international, orderCategory, dateMode, startDate, endDate, startTime, endTime]);
 
   const dispatchRequestSequence = useRef(0);
   const loadDispatch = useCallback(async (force = false) => {
@@ -265,7 +310,7 @@ export default function DelayDashboardPage() {
       const res = await fetch("/api/delay-dashboard/dispatch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ facility, nddOnly, jit, international, dateRange, force }),
+        body: JSON.stringify({ facility, priority, jit, international, dateRange, category: orderCategory, force }),
       }).then((r) => r.json());
       if (sequence !== dispatchRequestSequence.current) return;
       if (res.ok !== true) throw new Error(res.error || "Request failed");
@@ -276,7 +321,7 @@ export default function DelayDashboardPage() {
     } finally {
       if (sequence === dispatchRequestSequence.current) setDispatchLoading(false);
     }
-  }, [facility, nddOnly, jit, international, dateMode, startDate, endDate, startTime, endTime]);
+  }, [facility, priority, jit, international, orderCategory, dateMode, startDate, endDate, startTime, endTime]);
 
   const clRequestSequence = useRef(0);
   const loadCl = useCallback(async (force = false) => {
@@ -288,7 +333,7 @@ export default function DelayDashboardPage() {
       const res = await fetch("/api/delay-dashboard/cl", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ facility, nddOnly, jit, international, dateRange, force }),
+        body: JSON.stringify({ facility, priority, jit: "all", international, dateRange, category: orderCategory, force }),
       }).then((r) => r.json());
       if (sequence !== clRequestSequence.current) return;
       if (res.ok !== true) throw new Error(res.error || "Request failed");
@@ -299,7 +344,56 @@ export default function DelayDashboardPage() {
     } finally {
       if (sequence === clRequestSequence.current) setClLoading(false);
     }
-  }, [facility, nddOnly, jit, international, dateMode, startDate, endDate, startTime, endTime]);
+  }, [facility, priority, international, orderCategory, dateMode, startDate, endDate, startTime, endTime]);
+
+  const fr0bRequestSequence = useRef(0);
+  const loadFr0b = useCallback(async (force = false) => {
+    const sequence = ++fr0bRequestSequence.current;
+    setFr0bLoading(true);
+    setFr0bError(null);
+    try {
+      const dateRange = dateRangeFor(dateMode, startDate, endDate, startTime, endTime);
+      const res = await fetch("/api/delay-dashboard/fr0-bulk", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ facility, priority, jit: "all", international, dateRange, category: orderCategory, force }),
+      }).then((r) => r.json());
+      if (sequence !== fr0bRequestSequence.current) return;
+      if (res.ok !== true) throw new Error(res.error || "Request failed");
+      setFr0bData(res.data as DispatchReportData);
+    } catch (err) {
+      if (sequence !== fr0bRequestSequence.current) return;
+      setFr0bError(err instanceof Error ? err.message : "Failed to load.");
+    } finally {
+      if (sequence === fr0bRequestSequence.current) setFr0bLoading(false);
+    }
+  }, [facility, priority, international, orderCategory, dateMode, startDate, endDate, startTime, endTime]);
+
+  const unfRequestSequence = useRef(0);
+  const loadUnf = useCallback(async (force = false) => {
+    const sequence = ++unfRequestSequence.current;
+    setUnfLoading(true);
+    try {
+      const dateRange = dateRangeFor(dateMode, startDate, endDate, startTime, endTime);
+      const res = await fetch("/api/delay-dashboard/unf-count", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ facility, priority, international, dateRange, force }),
+      }).then((r) => r.json());
+      if (sequence !== unfRequestSequence.current) return;
+      setUnfCount(res.ok === true ? { total: res.data.total, found: res.data.found } : null);
+    } catch {
+      if (sequence === unfRequestSequence.current) setUnfCount(null);
+    } finally {
+      if (sequence === unfRequestSequence.current) setUnfLoading(false);
+    }
+  }, [facility, priority, international, dateMode, startDate, endDate, startTime, endTime]);
+
+  useEffect(() => {
+    // This effect intentionally refreshes the UNF count whenever its filters change.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadUnf();
+  }, [loadUnf]);
 
   useEffect(() => {
     // This effect intentionally synchronizes the selected filters with server data.
@@ -333,6 +427,16 @@ export default function DelayDashboardPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `view` is deliberately read, not a dependency: a plain tab switch must not retrigger this
   }, [loadCl]);
+  const fr0bStaleRef = useRef(true);
+  useEffect(() => {
+    fr0bStaleRef.current = true;
+    if (view === "fr0Bulk") {
+      fr0bStaleRef.current = false;
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      void loadFr0b();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `view` is deliberately read, not a dependency: a plain tab switch must not retrigger this
+  }, [loadFr0b]);
   // This effect intentionally fetches on first visit to a tab whose data was
   // marked stale by the filter-change effects above.
   useEffect(() => {
@@ -344,17 +448,23 @@ export default function DelayDashboardPage() {
       clStaleRef.current = false;
       void loadCl();
     }
-  }, [view, loadDispatch, loadCl]);
+    if (view === "fr0Bulk" && fr0bStaleRef.current) {
+      fr0bStaleRef.current = false;
+      void loadFr0b();
+    }
+  }, [view, loadDispatch, loadCl, loadFr0b]);
 
   useEffect(() => {
     if (!autoSec) return;
     const id = setInterval(() => {
       void load();
+      void loadUnf();
       if (view === "dispatch") void loadDispatch();
       if (view === "cl") void loadCl();
+      if (view === "fr0Bulk") void loadFr0b();
     }, autoSec * 1000);
     return () => clearInterval(id);
-  }, [autoSec, load, loadDispatch, loadCl, view]);
+  }, [autoSec, load, loadUnf, loadDispatch, loadCl, loadFr0b, view]);
 
   function setBucketSlot(dept: DeptKey, idx: number, hrs: string) {
     setBuckets((prev) => {
@@ -424,9 +534,29 @@ export default function DelayDashboardPage() {
     setClViewMode(mode);
     localStorage.setItem(CL_VIEW_MODE_STORAGE_KEY, mode);
   }
+  function setFr0bBucketSlot(stage: Fr0B.StageKey, idx: number, hrs: string) {
+    setFr0bBuckets((prev) => {
+      const next = { ...prev, [stage]: [...prev[stage]] };
+      next[stage][idx] = hrs === "" ? null : { op: ">", hrs: Math.max(0, Number(hrs) || 0) };
+      localStorage.setItem(FR0B_BUCKETS_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  }
+  function resetFr0bBuckets() {
+    setFr0bBuckets(Fr0B.DEFAULT_BUCKETS);
+    localStorage.setItem(FR0B_BUCKETS_STORAGE_KEY, JSON.stringify(Fr0B.DEFAULT_BUCKETS));
+  }
+  function changeFr0bViewMode(mode: Fr0B.ViewMode) {
+    setFr0bViewMode(mode);
+    localStorage.setItem(FR0B_VIEW_MODE_STORAGE_KEY, mode);
+  }
+  function changeOrderCategory(next: OrderCategory) {
+    setOrderCategory(next);
+    try { localStorage.setItem(ORDER_CATEGORY_STORAGE_KEY, next); } catch { /* ignore */ }
+  }
   function navigateTo(nextView: View) {
     setView(nextView);
-    if (NDD_ONLY_LOCKED_VIEWS.includes(nextView)) setNddOnly(true);
+    if (NDD_ONLY_LOCKED_VIEWS.includes(nextView)) setPriority("p1");
   }
   function openDrilldown(title: string, subtitle: string, orders: AgingItem[]) {
     setReturnView(view);
@@ -443,12 +573,28 @@ export default function DelayDashboardPage() {
     setClDrilldown({ title, subtitle, orders });
     setView("clDrilldown");
   }
+  function openFr0bDrilldown(title: string, subtitle: string, orders: Fr0B.PendencyItem[]) {
+    setReturnView(view);
+    setFr0bDrilldown({ title, subtitle, orders });
+    setView("fr0BulkDrilldown");
+  }
   function closeDrilldown() {
     setDrilldown(null);
     setDispatchDrilldown(null);
     setClDrilldown(null);
+    setFr0bDrilldown(null);
     setView(returnView);
   }
+
+  const clItemTypes = useMemo(() => (clData ? ClR.itemTypesIn(clData.categories) : []), [clData]);
+  const clFiltered = useMemo(
+    () => (clData ? ClR.filterByItemType(clData.categories, clItemType) : null),
+    [clData, clItemType],
+  );
+  const fr0bFiltered = useMemo(
+    () => (fr0bData ? Fr0B.filterByItemType(fr0bData.categories, fr0bItemType) : null),
+    [fr0bData, fr0bItemType],
+  );
 
   const dateLabel = dateMode === "allPeriod" ? "All Period"
     : dateMode === "today" ? "Today"
@@ -484,10 +630,23 @@ export default function DelayDashboardPage() {
         {view === "clDrilldown" && (
           <button type="button" className="tab active">{clDrilldown?.title || "Orders"}</button>
         )}
+        {view === "fr0BulkDrilldown" && (
+          <button type="button" className="tab active">{fr0bDrilldown?.title || "Orders"}</button>
+        )}
       </div>
 
       <div className="card card-pad stack" style={{ marginBottom: 14 }}>
         <div className="toolbar">
+          <div className="field">
+            <label className="label">Orders</label>
+            <div className="tabs">
+              <button type="button" className={`tab${orderCategory === "FULFILLABLE_ORDERS" ? " active" : ""}`} onClick={() => changeOrderCategory("FULFILLABLE_ORDERS")}>Fulfillable</button>
+              <button type="button" className={`tab${orderCategory === "UNFULFILLABLE_ORDERS" ? " active" : ""}`} onClick={() => changeOrderCategory("UNFULFILLABLE_ORDERS")}
+                title="Unfulfillable orders across FR1, FR2, FR0 and Bulk — live count for the current Facility, Priority, International and Date range">
+                UNF <b className="mono">{unfLoading && !unfCount ? "…" : unfCount?.found ? unfCount.total.toLocaleString("en-IN") : "–"}</b>
+              </button>
+            </div>
+          </div>
           <div className="field" style={{ minWidth: 100 }}>
             <label className="label" htmlFor="dd-facility">Facility</label>
             <div className="dl-filter-ico">
@@ -498,45 +657,57 @@ export default function DelayDashboardPage() {
               </select>
             </div>
           </div>
-          <label className="ctl-check dl-filter-check" title={NDD_ONLY_LOCKED_VIEWS.includes(view) ? "The NDD Shift Report is always P1-only" : "ON = NDD orders only (priority 1) | OFF = every order in the panel"}>
-            <input
-              type="checkbox"
-              checked={nddOnly}
-              disabled={NDD_ONLY_LOCKED_VIEWS.includes(view)}
-              onChange={(e) => setNddOnly(e.target.checked)}
-            /> <Zap size={12} /> <span>NDD Only</span>
-          </label>
-          <div className="field" style={{ minWidth: 165 }}>
+          <div className="field" style={{ minWidth: 115 }}>
+            <label className="label" htmlFor="dd-priority">Priority</label>
+            <div className="dl-filter-ico">
+              <Zap size={12} />
+              <select
+                id="dd-priority"
+                className="select"
+                value={priority}
+                disabled={NDD_ONLY_LOCKED_VIEWS.includes(view)}
+                title={NDD_ONLY_LOCKED_VIEWS.includes(view) ? "The NDD Shift Report is always P1-only" : "Picking priority"}
+                onChange={(e) => setPriority(e.target.value as Priority)}
+              >
+                <option value="p1">P1</option>
+                <option value="p2">P2</option>
+                <option value="all">All Orders</option>
+              </select>
+            </div>
+          </div>
+          {!NO_JIT_VIEWS.includes(view) && (
+          <div className="field" style={{ minWidth: 95 }}>
             <label className="label" htmlFor="dd-jit">JIT</label>
             <div className="dl-filter-ico">
               <Timer size={12} />
               <select id="dd-jit" className="select" value={jit} onChange={(e) => setJit(e.target.value as Jit)}>
-                <option value="all">All, JIT and NON JIT</option>
-                <option value="jit">JIT only</option>
-                <option value="nonjit">Non-JIT only</option>
+                <option value="all">All</option>
+                <option value="jit">JIT</option>
+                <option value="nonjit">NJIT</option>
               </select>
             </div>
           </div>
+          )}
           {(view === "report" || view === "shiftReport") && (
-            <div className="field" style={{ minWidth: 140 }}>
+            <div className="field" style={{ minWidth: 100 }}>
               <label className="label" htmlFor="dd-fr">FR Tag</label>
               <div className="dl-filter-ico">
                 <Tag size={12} />
                 <select id="dd-fr" className="select" value={frFilter} onChange={(e) => setFrFilter(e.target.value as FrFilter)}>
-                  <option value="all">All, FR1 and FR2</option>
-                  <option value="FR1">FR1 only</option>
-                  <option value="FR2">FR2 only</option>
+                  <option value="all">All</option>
+                  <option value="FR1">FR1</option>
+                  <option value="FR2">FR2</option>
                 </select>
               </div>
             </div>
           )}
           {(view === "report" || view === "shiftReport") && (
-            <div className="field" style={{ minWidth: 140 }}>
+            <div className="field" style={{ minWidth: 115 }}>
               <label className="label" htmlFor="dd-frame">Frame type</label>
               <div className="dl-filter-ico">
                 <Glasses size={12} />
                 <select id="dd-frame" className="select" value={frameFilter} onChange={(e) => setFrameFilter(e.target.value as FrameFilter)}>
-                  <option value="all">All frames</option>
+                  <option value="all">All</option>
                   <option value="fullrim">Full rim</option>
                   <option value="halfrim">Half rim</option>
                   <option value="rimless">Rimless</option>
@@ -545,31 +716,31 @@ export default function DelayDashboardPage() {
             </div>
           )}
           {(view === "report" || view === "shiftReport") && (
-            <div className="field" style={{ minWidth: 240 }}>
+            <div className="field" style={{ minWidth: 135 }}>
               <label className="label" htmlFor="dd-lens">Lens type</label>
               <div className="dl-filter-ico">
                 <Layers size={12} />
                 <select id="dd-lens" className="select" value={lensTypeFilter} onChange={(e) => setLensTypeFilter(e.target.value as LensTypeFilter)}>
-                  <option value="all">All, SV and Stock PRG (Cyc, Non-Cyc and Mixed)</option>
-                  <option value="single_vision">Single Vision</option>
-                  <option value="stock_progressive">Stock Progressive (all)</option>
-                  <optgroup label="Stock Progressive — by type">
-                    <option value="stock_progressive_cyl">Cylindrical</option>
-                    <option value="stock_progressive_noncyl">Non-Cylindrical</option>
+                  <option value="all">All</option>
+                  <option value="single_vision">SV</option>
+                  <option value="stock_progressive">Stock PRG (All)</option>
+                  <optgroup label="Stock PRG — by type">
+                    <option value="stock_progressive_cyl">CYL</option>
+                    <option value="stock_progressive_noncyl">NCYL</option>
                     <option value="stock_progressive_mixed">Mixed</option>
                   </optgroup>
                 </select>
               </div>
             </div>
           )}
-          <div className="field" style={{ minWidth: 165 }}>
+          <div className="field" style={{ minWidth: 110 }}>
             <label className="label" htmlFor="dd-intl">International</label>
             <div className="dl-filter-ico">
               <Globe size={12} />
               <select id="dd-intl" className="select" value={international} onChange={(e) => setInternational(e.target.value as International)}>
-                <option value="all">All, Intl and Doms</option>
-                <option value="intl">International only</option>
-                <option value="nonintl">Non-International only</option>
+                <option value="all">All</option>
+                <option value="intl">Intl</option>
+                <option value="nonintl">Domestic</option>
               </select>
             </div>
           </div>
@@ -722,14 +893,26 @@ export default function DelayDashboardPage() {
             </div>
           )}
           {view === "cl" && (
-            <div className="field" style={{ minWidth: 165 }}>
+            <div className="field" style={{ minWidth: 115 }}>
               <label className="label" htmlFor="dd-cltag">CL Tag</label>
               <div className="dl-filter-ico">
                 <Tag size={12} />
                 <select id="dd-cltag" className="select" value={clTagFilter} onChange={(e) => setClTagFilter(e.target.value as ClR.TagFilter)}>
-                  <option value="all">All, CL-FR0 and Bulk</option>
-                  <option value="CL">CL-FR0 only</option>
-                  <option value="BULK">Bulk only</option>
+                  <option value="all">All</option>
+                  <option value="CL">CL-FR0</option>
+                  <option value="BULK">Bulk</option>
+                </select>
+              </div>
+            </div>
+          )}
+          {view === "cl" && (
+            <div className="field" style={{ minWidth: 150 }}>
+              <label className="label" htmlFor="dd-clitem">Item type</label>
+              <div className="dl-filter-ico">
+                <Glasses size={12} />
+                <select id="dd-clitem" className="select" value={clItemType} onChange={(e) => setClItemType(e.target.value)}>
+                  <option value="all">All</option>
+                  {clItemTypes.map((t) => <option key={t} value={t}>{t.replace(/_/g, " ")}</option>)}
                 </select>
               </div>
             </div>
@@ -767,6 +950,66 @@ export default function DelayDashboardPage() {
               )}
             </div>
           )}
+          {view === "fr0Bulk" && (
+            <div className="field" style={{ minWidth: 115 }}>
+              <label className="label" htmlFor="dd-fr0btag">FR0 / Bulk</label>
+              <div className="dl-filter-ico">
+                <Tag size={12} />
+                <select id="dd-fr0btag" className="select" value={fr0bTagFilter} onChange={(e) => setFr0bTagFilter(e.target.value as Fr0B.TagFilter)}>
+                  <option value="all">All</option>
+                  <option value="FR0">FR0</option>
+                  <option value="BULK">Bulk</option>
+                </select>
+              </div>
+            </div>
+          )}
+          {view === "fr0Bulk" && (
+            <div className="field" style={{ minWidth: 125 }}>
+              <label className="label" htmlFor="dd-fr0bitem">Item type</label>
+              <div className="dl-filter-ico">
+                <Glasses size={12} />
+                <select id="dd-fr0bitem" className="select" value={fr0bItemType} onChange={(e) => setFr0bItemType(e.target.value as Fr0B.ItemTypeFilter)}>
+                  <option value="all">All</option>
+                  <option value="FRAME">Frame</option>
+                  <option value="SUNGLASS">Sunglass</option>
+                  <option value="ACCESSORIES">Accessories</option>
+                </select>
+              </div>
+            </div>
+          )}
+          {view === "fr0Bulk" && (fr0bTagFilter === "all" || fr0bTagFilter === "BULK") && (
+            <div className="field">
+              <label className="label">Bulk view</label>
+              <div className="tabs">
+                <button type="button" className={`tab${fr0bViewMode === "order" ? " active" : ""}`} onClick={() => changeFr0bViewMode("order")} title="One row per order/shipment">Order wise</button>
+                <button type="button" className={`tab${fr0bViewMode === "shipment" ? " active" : ""}`} onClick={() => changeFr0bViewMode("shipment")} title="One row per individual item/unit - matches NexS's own monitor panel counts">Shipment wise</button>
+              </div>
+            </div>
+          )}
+          {view === "fr0Bulk" && (
+            <div className="field" style={{ position: "relative" }}>
+              <label className="label">Hour buckets</label>
+              <button type="button" className="button small" onClick={() => setFr0bBucketsOpen((o) => !o)}><Settings size={12} /> Configure</button>
+              {fr0bBucketsOpen && (
+                <div className="card card-pad stack" style={{ position: "absolute", top: 54, right: 0, zIndex: 30, width: 360 }}>
+                  <div className="toolbar" style={{ justifyContent: "space-between", flexWrap: "nowrap" }}>
+                    <span className="dim" style={{ fontSize: 10 }}>Per-stage delay thresholds</span>
+                    <button type="button" className="button ghost small" onClick={resetFr0bBuckets}>Reset</button>
+                  </div>
+                  {Fr0B.STAGE_ORDER.map((stage) => (
+                    <div key={stage} className="toolbar" style={{ justifyContent: "space-between", flexWrap: "nowrap" }}>
+                      <span style={{ fontSize: 11, minWidth: 140 }}>{Fr0B.STAGE_META[stage].label}</span>
+                      {[0, 1, 2].map((idx) => (
+                        <input key={idx} type="number" min="0" step="0.5" className="input mono" style={{ width: 50, height: 28, padding: "0 6px", flexShrink: 0 }}
+                          value={fr0bBuckets[stage]?.[idx]?.hrs ?? ""} placeholder="off"
+                          onChange={(e) => setFr0bBucketSlot(stage, idx, e.target.value)} />
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           <div className="field" style={{ minWidth: 110 }}>
             <label className="label" htmlFor="dd-auto">Auto-refresh</label>
             <div className="dl-filter-ico">
@@ -785,17 +1028,19 @@ export default function DelayDashboardPage() {
           <button
             type="button"
             className="button primary"
-            disabled={loading || (view === "dispatch" && dispatchLoading) || (view === "cl" && clLoading)}
+            disabled={loading || (view === "dispatch" && dispatchLoading) || (view === "cl" && clLoading) || (view === "fr0Bulk" && fr0bLoading)}
             onClick={() => {
               void load(true);
+              void loadUnf(true);
               if (view === "dispatch") void loadDispatch(true);
               if (view === "cl") void loadCl(true);
+              if (view === "fr0Bulk") void loadFr0b(true);
             }}
           >
-            {loading || (view === "dispatch" && dispatchLoading) || (view === "cl" && clLoading)
+            {loading || (view === "dispatch" && dispatchLoading) || (view === "cl" && clLoading) || (view === "fr0Bulk" && fr0bLoading)
               ? <span className="spinner" /> : <RefreshCw size={13} />}
             {" "}
-            {loading || (view === "dispatch" && dispatchLoading) || (view === "cl" && clLoading) ? "Refreshing…" : "Refresh"}
+            {loading || (view === "dispatch" && dispatchLoading) || (view === "cl" && clLoading) || (view === "fr0Bulk" && fr0bLoading) ? "Refreshing…" : "Refresh"}
           </button>
           {fetchedAt && <span className="last-updated dim mono">Updated {fmtTime(fetchedAt)}</span>}
         </div>
@@ -809,6 +1054,9 @@ export default function DelayDashboardPage() {
         )}
         {view === "cl" && clError && (
           <div className="alert error">⚠ CL Report data unavailable — {clError}</div>
+        )}
+        {view === "fr0Bulk" && fr0bError && (
+          <div className="alert error">⚠ FR0 Bulk Report data unavailable — {fr0bError}</div>
         )}
       </div>
 
@@ -857,9 +1105,9 @@ export default function DelayDashboardPage() {
           </span>
         </div>
       )}
-      {view === "cl" && clData && (
+      {view === "cl" && clFiltered && (
         <ClReportView
-          categories={clData.categories}
+          categories={clFiltered}
           buckets={clBuckets}
           tagFilter={clTagFilter}
           viewMode={clViewMode}
@@ -871,6 +1119,23 @@ export default function DelayDashboardPage() {
           <span>
             <strong>{clLoading ? "Loading CL Report…" : clError ? "CL data unavailable" : "No data yet"}</strong>
             {!clLoading && clError && <>{clError}</>}
+          </span>
+        </div>
+      )}
+      {view === "fr0Bulk" && fr0bFiltered && (
+        <Fr0BulkReportView
+          categories={fr0bFiltered}
+          buckets={fr0bBuckets}
+          tagFilter={fr0bTagFilter}
+          viewMode={fr0bViewMode}
+          onDrilldown={openFr0bDrilldown}
+        />
+      )}
+      {view === "fr0Bulk" && !fr0bData && (
+        <div className="card empty">
+          <span>
+            <strong>{fr0bLoading ? "Loading FR0 Bulk Report…" : fr0bError ? "FR0 Bulk data unavailable" : "No data yet"}</strong>
+            {!fr0bLoading && fr0bError && <>{fr0bError}</>}
           </span>
         </div>
       )}
@@ -890,6 +1155,9 @@ export default function DelayDashboardPage() {
       )}
       {view === "clDrilldown" && clDrilldown && (
         <ClDrilldownView title={clDrilldown.title} subtitle={clDrilldown.subtitle} orders={clDrilldown.orders} onBack={closeDrilldown} />
+      )}
+      {view === "fr0BulkDrilldown" && fr0bDrilldown && (
+        <Fr0BulkDrilldownView title={fr0bDrilldown.title} subtitle={fr0bDrilldown.subtitle} orders={fr0bDrilldown.orders} onBack={closeDrilldown} />
       )}
     </div>
   );

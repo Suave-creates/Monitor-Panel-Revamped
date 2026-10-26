@@ -21,17 +21,17 @@ import {
   MEI_DWELL,
   mergeQcfOrders,
   normFrame,
-  PACKING_DISPATCH_CATEGORY,
+  parseOrderCategory,
   PACKING_DISPATCH_SUBSTAGES,
-  QCFAIL_CATEGORY,
   QCFAIL_SUBSTAGES,
   STAGES,
   stageStats,
-  WAREHOUSE_CATEGORY,
   WAREHOUSE_SUBSTAGES,
   type DateRange,
   type GroupedOrder,
   type International,
+  type OrderCategory,
+  type Priority,
   type OrderItem,
   type RawRow,
   type StageKey,
@@ -98,6 +98,11 @@ function parseFrameFilter(value: unknown): FrameFilter {
   if (value === "fullrim" || value === "halfrim" || value === "rimless" || value === "all") return value;
   throw new InputError("frameFilter must be all, fullrim, halfrim, or rimless.");
 }
+const PRIORITIES = ["p1", "p2", "all"] as const;
+function parsePriority(value: unknown): Priority {
+  return PRIORITIES.find((p) => p === value) ?? "p1";
+}
+
 function parseInternational(value: unknown): International {
   return value === "intl" || value === "nonintl" ? value : "all";
 }
@@ -126,7 +131,7 @@ async function fetchMonitoringRows(
   apiStatus: string,
   category: string,
   frTag: string,
-  nddOnly: boolean,
+  priority: Priority,
   dateRange: DateRange | undefined,
   international: International,
   facility: Facility,
@@ -137,7 +142,7 @@ async function fetchMonitoringRows(
       method: "POST",
       headers: { ...operationalHeaders(facility), ...auth },
       body: JSON.stringify(buildMonitoringBody(apiStatus, {
-        page, category, frTag, nddOnly, dateRange, pageSize: PAGE_SIZE, international, qcFailFilter,
+        page, category, frTag, priority, dateRange, pageSize: PAGE_SIZE, international, qcFailFilter,
       })),
     }, 30_000).then(extractPage);
 
@@ -171,13 +176,13 @@ function applyJitFilter<T extends { jitFlag: boolean }>(orders: T[], jit: Jit): 
 
 /* ── Report: QC + Fitting + MEI in one response, with optional frame filter ── */
 async function fetchStageOrders(
-  request: Request, stageKey: StageKey, frFilter: FrFilter, nddOnly: boolean,
-  dateRange: DateRange | undefined, international: International, facility: Facility,
+  request: Request, stageKey: StageKey, frFilter: FrFilter, priority: Priority,
+  dateRange: DateRange | undefined, international: International, facility: Facility, category: OrderCategory,
 ): Promise<GroupedOrder[]> {
   const cfg = STAGES[stageKey];
   const frTags = frFilter === "all" ? ["FR1", "FR2"] : [frFilter];
   const perTag = await Promise.all(frTags.map((frTag) =>
-    fetchMonitoringRows(request, cfg.apiStatus, cfg.category, frTag, nddOnly, dateRange, international, facility)));
+    fetchMonitoringRows(request, cfg.apiStatus, category, frTag, priority, dateRange, international, facility)));
   return groupOrders(perTag.flat(), stageKey);
 }
 
@@ -214,12 +219,12 @@ function applyFrameFilter(orders: GroupedOrder[], frameFilter: FrameFilter, fram
 }
 
 async function fetchReport(
-  request: Request, facility: Facility, nddOnly: boolean, jit: Jit, frFilter: FrFilter,
-  frameFilter: FrameFilter, international: International, dateRange: DateRange | undefined,
+  request: Request, facility: Facility, priority: Priority, jit: Jit, frFilter: FrFilter,
+  frameFilter: FrameFilter, international: International, dateRange: DateRange | undefined, category: OrderCategory,
 ) {
   const stageKeys = Object.keys(STAGES) as StageKey[];
   const rawByStage = await Promise.all(stageKeys.map((stageKey) =>
-    fetchStageOrders(request, stageKey, frFilter, nddOnly, dateRange, international, facility)));
+    fetchStageOrders(request, stageKey, frFilter, priority, dateRange, international, facility, category)));
 
   const frameTypes = frameFilter === "all"
     ? new Map<string, string>()
@@ -229,7 +234,7 @@ async function fetchReport(
   stageKeys.forEach((stageKey, index) => {
     let orders = applyJitFilter(rawByStage[index], jit);
     orders = applyFrameFilter(orders, frameFilter, frameTypes);
-    const dwt = stageKey === "MEI" && !nddOnly ? MEI_DWELL : DWELL;
+    const dwt = stageKey === "MEI" && priority !== "p1" ? MEI_DWELL : DWELL;
     const stats = stageStats(orders, stageKey, dwt);
     stages[stageKey] = { stats: { ...stats, health: health(stats) }, orders };
   });
@@ -240,20 +245,20 @@ async function fetchReport(
 /* ── Warehouse / Packing & Dispatch (generic sub-stage fetch) ────────── */
 async function fetchSubStageOrders(
   request: Request, sub: { key: string; api: string; label: string }, category: string,
-  frFilter: FrFilter, nddOnly: boolean, dateRange: DateRange | undefined, international: International, facility: Facility,
+  frFilter: FrFilter, priority: Priority, dateRange: DateRange | undefined, international: International, facility: Facility,
 ): Promise<TaggedOrder[]> {
   const frTags = frFilter === "all" ? ["FR1", "FR2"] : [frFilter];
   const perTag = await Promise.all(frTags.map((frTag) =>
-    fetchMonitoringRows(request, sub.api, category, frTag, nddOnly, dateRange, international, facility)));
+    fetchMonitoringRows(request, sub.api, category, frTag, priority, dateRange, international, facility)));
   return groupTaggedOrders(perTag.flat(), sub.key, sub.label);
 }
 
 async function fetchPipelineSection(
   request: Request, facility: Facility, substages: { key: string; api: string; label: string }[], category: string,
-  nddOnly: boolean, jit: Jit, frFilter: FrFilter, international: International, dateRange: DateRange | undefined,
+  priority: Priority, jit: Jit, frFilter: FrFilter, international: International, dateRange: DateRange | undefined,
 ) {
   const bySubStage = await Promise.all(substages.map((sub) =>
-    fetchSubStageOrders(request, sub, category, frFilter, nddOnly, dateRange, international, facility)));
+    fetchSubStageOrders(request, sub, category, frFilter, priority, dateRange, international, facility)));
   let orders = bySubStage.flat();
   orders = applyJitFilter(orders, jit);
   const stats = aggregateStats(orders, DWELL);
@@ -263,11 +268,11 @@ async function fetchPipelineSection(
 /* ── QC-Fail rework pipeline ──────────────────────────────────────── */
 async function fetchQcfailSub(
   request: Request, sub: { key: string; api: string; qcFailFilter?: boolean }, frFilter: FrFilter,
-  nddOnly: boolean, dateRange: DateRange | undefined, international: International, facility: Facility,
+  priority: Priority, dateRange: DateRange | undefined, international: International, facility: Facility, category: OrderCategory,
 ) {
   const frTags = frFilter === "all" ? ["FR1", "FR2"] : [frFilter];
   const perTag = await Promise.all(frTags.map((frTag) =>
-    fetchMonitoringRows(request, sub.api, QCFAIL_CATEGORY, frTag, nddOnly, dateRange, international, facility, sub.qcFailFilter || false)));
+    fetchMonitoringRows(request, sub.api, category, frTag, priority, dateRange, international, facility, sub.qcFailFilter || false)));
   return groupQcfOrders(perTag.flat(), sub.key);
 }
 
@@ -300,12 +305,12 @@ async function fetchItemDetails(request: Request, facility: Facility, shipmentId
 }
 
 async function fetchQcfail(
-  request: Request, facility: Facility, nddOnly: boolean, jit: Jit, frFilter: FrFilter,
-  international: International, dateRange: DateRange | undefined,
+  request: Request, facility: Facility, priority: Priority, jit: Jit, frFilter: FrFilter,
+  international: International, dateRange: DateRange | undefined, category: OrderCategory,
 ) {
   const dataBySubKey: Record<string, TaggedOrder[]> = {};
   await Promise.all(QCFAIL_SUBSTAGES.map(async (sub) => {
-    dataBySubKey[sub.key] = await fetchQcfailSub(request, sub, frFilter, nddOnly, dateRange, international, facility);
+    dataBySubKey[sub.key] = await fetchQcfailSub(request, sub, frFilter, priority, dateRange, international, facility, category);
   }));
 
   const packageIds = new Set<string>();
@@ -354,39 +359,40 @@ export async function POST(request: Request) {
     if (!input) throw new InputError("Expected a JSON object.");
     const action = parseAction(input.action);
     const facility = parseFacility(input.facility);
-    const nddOnly = input.nddOnly !== false;
+    const priority = parsePriority(input.priority);
     const jit = parseJit(input.jit);
     const frFilter = parseFrFilter(input.frFilter);
     const international = parseInternational(input.international);
     const dateRange = parseDateRange(input.dateRange);
+    const category = parseOrderCategory(input.category);
     const force = input.force === true;
 
     if (action === "report") {
       const frameFilter = parseFrameFilter(input.frameFilter);
-      const key = cacheKey("delay-dashboard-report", { facility, nddOnly, jit, frFilter, frameFilter, international, dateRange });
+      const key = cacheKey("delay-dashboard-report", { facility, priority, jit, frFilter, frameFilter, international, dateRange, category });
       const result = await cached(key, REPORT_TTL_MS, () =>
-        fetchReport(request, facility, nddOnly, jit, frFilter, frameFilter, international, dateRange), force);
+        fetchReport(request, facility, priority, jit, frFilter, frameFilter, international, dateRange, category), force);
       return jsonResponse({ ok: true, data: result.value, cache: result.cache });
     }
 
     if (action === "qcfail") {
-      const key = cacheKey("delay-dashboard-qcfail", { facility, nddOnly, jit, frFilter, international, dateRange });
+      const key = cacheKey("delay-dashboard-qcfail", { facility, priority, jit, frFilter, international, dateRange, category });
       const result = await cached(key, QCFAIL_TTL_MS, () =>
-        fetchQcfail(request, facility, nddOnly, jit, frFilter, international, dateRange), force);
+        fetchQcfail(request, facility, priority, jit, frFilter, international, dateRange, category), force);
       return jsonResponse({ ok: true, data: result.value, cache: result.cache });
     }
 
     if (action === "warehouse") {
-      const key = cacheKey("delay-dashboard-warehouse", { facility, nddOnly, jit, frFilter, international, dateRange });
+      const key = cacheKey("delay-dashboard-warehouse", { facility, priority, jit, frFilter, international, dateRange, category });
       const result = await cached(key, WAREHOUSE_TTL_MS, () =>
-        fetchPipelineSection(request, facility, WAREHOUSE_SUBSTAGES, WAREHOUSE_CATEGORY, nddOnly, jit, frFilter, international, dateRange), force);
+        fetchPipelineSection(request, facility, WAREHOUSE_SUBSTAGES, category, priority, jit, frFilter, international, dateRange), force);
       return jsonResponse({ ok: true, data: result.value, cache: result.cache });
     }
 
     // action === "packingDispatch"
-    const key = cacheKey("delay-dashboard-packing-dispatch", { facility, nddOnly, jit, frFilter, international, dateRange });
+    const key = cacheKey("delay-dashboard-packing-dispatch", { facility, priority, jit, frFilter, international, dateRange, category });
     const result = await cached(key, PACKING_DISPATCH_TTL_MS, () =>
-      fetchPipelineSection(request, facility, PACKING_DISPATCH_SUBSTAGES, PACKING_DISPATCH_CATEGORY, nddOnly, jit, frFilter, international, dateRange), force);
+      fetchPipelineSection(request, facility, PACKING_DISPATCH_SUBSTAGES, category, priority, jit, frFilter, international, dateRange), force);
     return jsonResponse({ ok: true, data: result.value, cache: result.cache });
   } catch (error) {
     return responseError(error);

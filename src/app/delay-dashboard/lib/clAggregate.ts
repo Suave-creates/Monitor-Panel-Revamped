@@ -32,6 +32,37 @@ export const DEPT_META: Record<DeptKey, { name: string; sub: string; ico: string
 };
 export const DEPT_ORDER: DeptKey[] = ["CL", "BULK"];
 
+/** The Item type filter — "all", or one raw Item Type value (e.g.
+ *  CONTACT_LENS). The options come from whatever the data contains. */
+export type ItemTypeFilter = string;
+
+export function itemTypesIn(categories: DispatchCategoriesData): string[] {
+  const set = new Set<string>();
+  for (const stages of Object.values(categories)) {
+    for (const entry of Object.values(stages)) {
+      for (const o of entry.orders) for (const i of o.items) if (i.itemType) set.add(i.itemType);
+    }
+  }
+  return [...set].sort();
+}
+
+/** Keeps only the items of the chosen type on each order and drops orders
+ *  left with none, so every downstream count reflects the filter. */
+export function filterByItemType(categories: DispatchCategoriesData, itemType: ItemTypeFilter): DispatchCategoriesData {
+  if (itemType === "all") return categories;
+  const out: DispatchCategoriesData = {};
+  for (const [dept, stages] of Object.entries(categories)) {
+    out[dept] = {};
+    for (const [stage, entry] of Object.entries(stages)) {
+      const orders = entry.orders
+        .map((o) => ({ ...o, items: o.items.filter((i) => i.itemType === itemType) }))
+        .filter((o) => o.items.length > 0);
+      out[dept][stage] = { orders, total: orders.length };
+    }
+  }
+  return out;
+}
+
 export const STAGE_META: Record<StageKey, { label: string; ico: string }> = {
   SYNCED: { label: "Synced", ico: "🔄" },
   PENDING_PICKING: { label: "Pending Picking", ico: "🕒" },
@@ -255,6 +286,38 @@ export function healthFor(list: PendencyItem[]) {
 export type MiniCol = { key: DeptKey; label: string; list: PendencyItem[] };
 export function stageDeptColumns(categories: DispatchCategoriesData, stage: StageKey, tagFilter: TagFilter, viewMode: ViewMode = "order"): MiniCol[] {
   return tagScopedCats(stage, tagFilter).map((d) => ({ key: d, label: DEPT_META[d].name, list: stageItems(categories, d, stage, viewMode) }));
+}
+
+/* ── Individual view — one card per category, its stages as columns ──── */
+export type StageCol = { key: StageKey; label: string; list: PendencyItem[] };
+export function scopedDepts(tagFilter: TagFilter): DeptKey[] {
+  return tagFilter === "all" ? DEPT_ORDER : DEPT_ORDER.filter((d) => d === tagFilter);
+}
+export function deptAllItems(categories: DispatchCategoriesData, dept: DeptKey, viewMode: ViewMode = "order"): PendencyItem[] {
+  return DEPT_META[dept].stages.flatMap((s) => stageItems(categories, dept, s, viewMode));
+}
+export function deptStageColumns(categories: DispatchCategoriesData, dept: DeptKey, viewMode: ViewMode = "order"): StageCol[] {
+  return DEPT_META[dept].stages.map((s) => ({ key: s, label: STAGE_META[s].label, list: stageItems(categories, dept, s, viewMode) }));
+}
+
+/* ── Item wise view — Bulk pendency per item type, counted per unit ───
+   Bulk shipments can hold hundreds of units, so this view always counts
+   individual items (exploded), independent of the Order/Shipment toggle. */
+export type ItemTypeCard = { itemType: string; items: PendencyItem[]; cols: StageCol[] };
+export function bulkItemTypeCards(categories: DispatchCategoriesData, tagFilter: TagFilter): ItemTypeCard[] {
+  if (tagFilter !== "all" && tagFilter !== "BULK") return [];
+  const stages = DEPT_META.BULK.stages;
+  const byStage = stages.map((s) => ({ stage: s, units: explodeToItemLevel(stageItems(categories, "BULK", s, "order")) }));
+  const types = new Set<string>();
+  byStage.forEach(({ units }) => units.forEach((u) => types.add(u.items[0]?.itemType || "UNKNOWN")));
+  return [...types].sort().map((itemType) => {
+    const cols = byStage.map(({ stage, units }) => ({
+      key: stage,
+      label: STAGE_META[stage].label,
+      list: units.filter((u) => (u.items[0]?.itemType || "UNKNOWN") === itemType),
+    }));
+    return { itemType, items: cols.flatMap((c) => c.list), cols };
+  });
 }
 
 /* ── KPIs ─────────────────────────────────────────────────────────── */

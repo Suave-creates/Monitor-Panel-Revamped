@@ -11,6 +11,8 @@
 // already-homogeneous order list — no rank-based sub-status derivation
 // needed, just group-by-Shipping-Package-ID.
 
+import { pickingPriorityFor, type OrderCategory, type Priority } from "./delay-dashboard";
+
 export type RawRow = Record<string, unknown>;
 
 function str(row: RawRow, key: string): string {
@@ -179,14 +181,15 @@ export function applyJitFilter<T extends { jitFlag: boolean }>(orders: T[], jit:
 
 export type DateRange = { startValue: string; endValue: string };
 export type International = "all" | "intl" | "nonintl";
+export type { Priority };
 
 export function buildMonitoringBody(
   deptKey: DeptKey,
   stageKey: StageKey,
-  opts: { page: number; nddOnly: boolean; dateRange?: DateRange; pageSize?: number; international?: International },
+  opts: { page: number; priority: Priority; dateRange?: DateRange; pageSize?: number; international?: International; category?: OrderCategory },
 ): RawRow {
   const dept = DEPTS[deptKey];
-  const { page, nddOnly, dateRange, pageSize = 500, international = "all" } = opts;
+  const { page, priority, dateRange, pageSize = 500, international = "all", category = "FULFILLABLE_ORDERS" } = opts;
   const binaryFilter: RawRow = {};
   if (international === "intl") binaryFilter.isInternationalOrder = true;
   else if (international === "nonintl") binaryFilter.isInternationalOrder = false;
@@ -194,7 +197,7 @@ export function buildMonitoringBody(
     page,
     pageSize,
     globalSearch: "",
-    category: "FULFILLABLE_ORDERS",
+    category,
     status: STAGE_META[stageKey].apiStatus,
     frTag: dept.frTag,
     version: "v3",
@@ -207,7 +210,7 @@ export function buildMonitoringBody(
         date: dateRange || { startValue: "", endValue: "" },
       },
       multiSelectFilters: {
-        pickingPriority: nddOnly ? [1] : [],
+        pickingPriority: pickingPriorityFor(priority),
         qcStatus: [],
         itemType: dept.itemType,
         orderChannel: [],

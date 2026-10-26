@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { FileSpreadsheet } from "lucide-react";
 import ClAgingMatrix from "./ClAgingMatrix";
 import {
@@ -9,9 +9,13 @@ import {
   bandClass,
   bandHdrLabel,
   bandBuckets,
+  bulkItemTypeCards,
   DAY_COLS,
   dayTier,
   daysMatrixRows,
+  DEPT_META,
+  deptStageColumns,
+  scopedDepts,
   healthFor,
   headerKpiItems,
   HOUR_COLS,
@@ -28,6 +32,15 @@ import {
   type ViewMode,
 } from "../lib/clAggregate";
 import { downloadXlsxRows, timestamp, type DispatchCategoriesData } from "../types";
+
+/** Shipment Not Generated stays in the aging matrices and KPIs but is
+ *  left out of every summary view (Individual, Board, Item wise). */
+const SUMMARY_STAGES = STAGE_ORDER.filter((s) => s !== "SHIPMENT_NOT_GENERATED");
+const inSummary = (c: { key: StageKey }) => c.key !== "SHIPMENT_NOT_GENERATED";
+
+type SummaryViewMode = "individual" | "board" | "item";
+
+const SUMMARY_VIEW_KEY = "delay-dashboard.cl.summaryView.v1";
 
 const DAY_LEGEND = [
   { tier: "good", label: "Good (0-1)" }, { tier: "watch", label: "Watch (2-3)" }, { tier: "delay", label: "Delay (4-5)" },
@@ -54,6 +67,22 @@ type Props = {
  *  narrowing filter (`tagFilter`, owned by page.tsx, same role as
  *  Delay Report's FR Tag filter) rather than a second card axis. */
 export default function ClReportView({ categories, buckets, tagFilter, viewMode, onDrilldown }: Props) {
+  const [summaryView, setSummaryView] = useState<SummaryViewMode>("board");
+
+  useEffect(() => {
+    // This effect intentionally hydrates client-only localStorage preferences after mount.
+    try {
+      const savedView = localStorage.getItem(SUMMARY_VIEW_KEY);
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      if (savedView === "individual" || savedView === "board" || savedView === "item") setSummaryView(savedView);
+    } catch { /* ignore */ }
+  }, []);
+
+  function changeSummaryView(v: SummaryViewMode) {
+    setSummaryView(v);
+    localStorage.setItem(SUMMARY_VIEW_KEY, v);
+  }
+
   const kpis = useMemo(() => headerKpiItems(categories, tagFilter, viewMode), [categories, tagFilter, viewMode]);
   const dayCols = DAY_COLS.map((c) => ({ key: c, tier: dayTier(c) }));
   const hourCols = HOUR_COLS.map((c) => ({ key: c.key, tier: c.tier }));
@@ -102,39 +131,144 @@ export default function ClReportView({ categories, buckets, tagFilter, viewMode,
       </div>
 
       <div className="card card-pad">
-        <div className="card-title" style={{ marginBottom: 12 }}>CL summary</div>
-        <div className="dl-dept-grid">
-          {STAGE_ORDER.map((stage) => {
-            const items = stageAllItems(categories, stage, tagFilter, viewMode);
-            const health = healthFor(items);
-            const cols = stageDeptColumns(categories, stage, tagFilter, viewMode);
-            const meta = STAGE_META[stage];
-            const tot = Math.max(1, health.total);
-            if (!cols.length) return null;
-            return (
-              <div key={stage} className="dl-dept">
-                <div className="dl-dept-hd">
-                  <span className="dl-dept-ico">{meta.ico}</span>
-                  <span className="dl-dept-name">{meta.label}</span>
-                  <span className={`dl-badge dl-badge-${health.badge}`}>{health.label}</span>
-                  <button type="button" className="dl-dept-total dl-link" onClick={() => onDrilldown(`${meta.label} — all orders`, "CL summary", items)}>
-                    Total <b>{health.total.toLocaleString("en-IN")}</b>
-                  </button>
-                </div>
-                <div className={cols.length > 4 ? "dl-dcols dl-dcols-grid" : "dl-dcols"}>
-                  {cols.map((c) => (
-                    <MiniColumn key={c.key} label={c.label} list={c.list} defs={activeBuckets(buckets[stage])}
-                      onHeaderClick={() => onDrilldown(`${meta.label} — ${c.label}`, "CL summary", c.list)}
-                      onBandClick={(band) => onDrilldown(`${meta.label} — ${c.label} ${bandHdrLabel(band.def)}`, "CL summary", band.list)} />
-                  ))}
-                </div>
-                <RagBar health={health} tot={tot} />
-              </div>
-            );
-          })}
+        <div className="card-title" style={{ marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+          <span>CL summary</span>
+          <div className="tabs" style={{ marginLeft: "auto" }}>
+            <button type="button" className={`tab${summaryView === "individual" ? " active" : ""}`} onClick={() => changeSummaryView("individual")}>Individual</button>
+            <button type="button" className={`tab${summaryView === "board" ? " active" : ""}`} onClick={() => changeSummaryView("board")}>Board</button>
+            <button type="button" className={`tab${summaryView === "item" ? " active" : ""}`} onClick={() => changeSummaryView("item")} title="Bulk pendency per item type, counted per unit">Item wise</button>
+          </div>
         </div>
+        {summaryView === "individual" ? (
+          <IndividualView categories={categories} tagFilter={tagFilter} viewMode={viewMode} buckets={buckets} onDrilldown={onDrilldown} />
+        ) : summaryView === "item" ? (
+          <ItemWiseView categories={categories} tagFilter={tagFilter} viewMode={viewMode} buckets={buckets} onDrilldown={onDrilldown} />
+        ) : (
+          <BoardView categories={categories} tagFilter={tagFilter} viewMode={viewMode} buckets={buckets} onDrilldown={onDrilldown} />
+        )}
       </div>
     </div>
+  );
+}
+
+type SummaryProps = {
+  categories: DispatchCategoriesData;
+  tagFilter: TagFilter;
+  viewMode: ViewMode;
+  buckets: Record<StageKey, BucketDef[]>;
+  onDrilldown: (title: string, subtitle: string, orders: PendencyItem[]) => void;
+};
+
+/** Individual: one card per category, its stages as the inner columns. */
+function IndividualView({ categories, tagFilter, viewMode, buckets, onDrilldown }: SummaryProps) {
+  return (
+    <div className="dl-dept-grid">
+      {scopedDepts(tagFilter).map((dept) => {
+        const cols = deptStageColumns(categories, dept, viewMode).filter(inSummary);
+        const items = cols.flatMap((c) => c.list);
+        const health = healthFor(items);
+        const meta = DEPT_META[dept];
+        const tot = Math.max(1, health.total);
+        return (
+          <div key={dept} className="dl-dept">
+            <div className="dl-dept-hd">
+              <span className="dl-dept-ico">{meta.ico}</span>
+              <span className="dl-dept-name">{meta.name}</span>
+              <span className={`dl-badge dl-badge-${health.badge}`}>{health.label}</span>
+              <button type="button" className="dl-dept-total dl-link" onClick={() => onDrilldown(`${meta.name} — all orders`, meta.sub, items)}>
+                Total <b>{health.total.toLocaleString("en-IN")}</b>
+              </button>
+            </div>
+            <div className={cols.length > 4 ? "dl-dcols dl-dcols-grid" : "dl-dcols"}>
+              {cols.map((c) => (
+                <MiniColumn key={c.key} label={c.label} list={c.list} defs={activeBuckets(buckets[c.key])}
+                  onHeaderClick={() => onDrilldown(`${meta.name} — ${c.label}`, meta.sub, c.list)}
+                  onBandClick={(band) => onDrilldown(`${meta.name} — ${c.label} ${bandHdrLabel(band.def)}`, meta.sub, band.list)} />
+              ))}
+            </div>
+            <RagBar health={health} tot={tot} />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Board: one card per stage, the categories as the inner columns. */
+function BoardView({ categories, tagFilter, viewMode, buckets, onDrilldown }: SummaryProps) {
+  return (
+    <div className="dl-dept-grid">
+      {SUMMARY_STAGES.map((stage) => {
+        const items = stageAllItems(categories, stage, tagFilter, viewMode);
+        const health = healthFor(items);
+        const cols = stageDeptColumns(categories, stage, tagFilter, viewMode);
+        const meta = STAGE_META[stage];
+        const tot = Math.max(1, health.total);
+        if (!cols.length) return null;
+        return (
+          <div key={stage} className="dl-dept">
+            <div className="dl-dept-hd">
+              <span className="dl-dept-ico">{meta.ico}</span>
+              <span className="dl-dept-name">{meta.label}</span>
+              <span className={`dl-badge dl-badge-${health.badge}`}>{health.label}</span>
+              <button type="button" className="dl-dept-total dl-link" onClick={() => onDrilldown(`${meta.label} — all orders`, "CL summary", items)}>
+                Total <b>{health.total.toLocaleString("en-IN")}</b>
+              </button>
+            </div>
+            <div className={cols.length > 4 ? "dl-dcols dl-dcols-grid" : "dl-dcols"}>
+              {cols.map((c) => (
+                <MiniColumn key={c.key} label={c.label} list={c.list} defs={activeBuckets(buckets[stage])}
+                  onHeaderClick={() => onDrilldown(`${meta.label} — ${c.label}`, "CL summary", c.list)}
+                  onBandClick={(band) => onDrilldown(`${meta.label} — ${c.label} ${bandHdrLabel(band.def)}`, "CL summary", band.list)} />
+              ))}
+            </div>
+            <RagBar health={health} tot={tot} />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Item wise: Bulk only — one card per item type, stages as columns,
+ *  every number a count of individual units (not shipments). */
+function ItemWiseView({ categories, tagFilter, buckets, onDrilldown }: SummaryProps) {
+  const cards = bulkItemTypeCards(categories, tagFilter);
+  if (!cards.length) {
+    return <p className="dim" style={{ fontSize: 12 }}>No Bulk items in view — set the filter to All or Bulk.</p>;
+  }
+  return (
+    <>
+      <div className="dl-dept-grid">
+        {cards.map((card) => {
+          const cols = card.cols.filter(inSummary);
+          const items = cols.flatMap((c) => c.list);
+          const health = healthFor(items);
+          const tot = Math.max(1, health.total);
+          const name = card.itemType.replace(/_/g, " ");
+          return (
+            <div key={card.itemType} className="dl-dept">
+              <div className="dl-dept-hd">
+                <span className="dl-dept-ico">📦</span>
+                <span className="dl-dept-name">{name}</span>
+                <span className={`dl-badge dl-badge-${health.badge}`}>{health.label}</span>
+                <button type="button" className="dl-dept-total dl-link" onClick={() => onDrilldown(`${name} — all items`, "CL summary · item wise", items)}>
+                  Total <b>{health.total.toLocaleString("en-IN")}</b>
+                </button>
+              </div>
+              <div className={cols.length > 4 ? "dl-dcols dl-dcols-grid" : "dl-dcols"}>
+                {cols.map((c) => (
+                  <MiniColumn key={c.key} label={c.label} list={c.list} defs={activeBuckets(buckets[c.key])}
+                    onHeaderClick={() => onDrilldown(`${name} — ${c.label}`, "CL summary · item wise", c.list)}
+                    onBandClick={(band) => onDrilldown(`${name} — ${c.label} ${bandHdrLabel(band.def)}`, "CL summary · item wise", band.list)} />
+                ))}
+              </div>
+              <RagBar health={health} tot={tot} />
+            </div>
+          );
+        })}
+      </div>
+    </>
   );
 }
 

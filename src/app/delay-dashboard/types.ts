@@ -11,10 +11,11 @@ export type Jit = "all" | "jit" | "nonjit";
 export type FrFilter = "all" | "FR1" | "FR2";
 export type FrameFilter = "all" | "fullrim" | "halfrim" | "rimless";
 export type International = "all" | "intl" | "nonintl";
+export type Priority = "p1" | "p2" | "all";
 export type DateMode = "allPeriod" | "today" | "last7" | "last20" | "custom";
 export type HealthCls = "ok" | "watch" | "alert" | "critical";
 export type Health = { cls: HealthCls; label: string };
-export type View = "report" | "shiftReport" | "pidMasters" | "dispatch" | "cl" | "drilldown" | "dispatchDrilldown" | "clDrilldown";
+export type View = "report" | "shiftReport" | "pidMasters" | "dispatch" | "cl" | "fr0Bulk" | "drilldown" | "dispatchDrilldown" | "clDrilldown" | "fr0BulkDrilldown";
 
 /** One frame/lens row within an order — carried through from the server
  *  (see src/lib/server/delay-dashboard.ts's OrderItem) so the client can

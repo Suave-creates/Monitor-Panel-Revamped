@@ -18,9 +18,11 @@ import {
   type DeptKey,
   type GroupedOrder,
   type International,
+  type Priority,
   type RawRow,
   type StageKey,
 } from "@/lib/server/cl-report";
+import { parseOrderCategory, type OrderCategory } from "@/lib/server/delay-dashboard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -63,6 +65,11 @@ function parseJit(value: unknown): Jit {
   if (value === "jit" || value === "nonjit" || value === "all") return value;
   throw new InputError("jit must be all, jit, or nonjit.");
 }
+const PRIORITIES = ["p1", "p2", "all"] as const;
+function parsePriority(value: unknown): Priority {
+  return PRIORITIES.find((p) => p === value) ?? "all";
+}
+
 function parseInternational(value: unknown): International {
   return value === "intl" || value === "nonintl" ? value : "all";
 }
@@ -88,13 +95,13 @@ function extractPage(payload: unknown): { rows: RawRow[]; total: number } {
 
 async function fetchDeptStage(
   request: Request, facility: Facility, deptKey: DeptKey, stageKey: StageKey,
-  nddOnly: boolean, dateRange: DateRange | undefined, international: International,
+  priority: Priority, dateRange: DateRange | undefined, international: International, category: OrderCategory,
 ): Promise<GroupedOrder[]> {
   return withAuthRetry(request, ANALYTICS_APP_ID, "all", async (auth) => {
     const fetchPage = (page: number) => fetchJson<unknown>(DETAILS_URL, {
       method: "POST",
       headers: { ...operationalHeaders(facility), ...auth },
-      body: JSON.stringify(buildMonitoringBody(deptKey, stageKey, { page, nddOnly, dateRange, pageSize: PAGE_SIZE, international })),
+      body: JSON.stringify(buildMonitoringBody(deptKey, stageKey, { page, priority, dateRange, pageSize: PAGE_SIZE, international, category })),
     }, 30_000).then(extractPage);
 
     const first = await fetchPage(0);
@@ -120,14 +127,14 @@ async function fetchDeptStage(
 }
 
 async function fetchReport(
-  request: Request, facility: Facility, nddOnly: boolean, jit: Jit,
-  international: International, dateRange: DateRange | undefined,
+  request: Request, facility: Facility, priority: Priority, jit: Jit,
+  international: International, dateRange: DateRange | undefined, category: OrderCategory,
 ) {
   const jobs: { dk: DeptKey; sk: StageKey }[] = [];
   DEPT_ORDER.forEach((dk) => DEPTS[dk].stages.forEach((sk) => jobs.push({ dk, sk })));
 
   const results = await mapLimit(jobs, 8, ({ dk, sk }) =>
-    fetchDeptStage(request, facility, dk, sk, nddOnly, dateRange, international));
+    fetchDeptStage(request, facility, dk, sk, priority, dateRange, international, category));
 
   const categories: Record<string, Record<string, { orders: GroupedOrder[]; total: number }>> = {};
   jobs.forEach(({ dk, sk }, index) => {
@@ -160,15 +167,16 @@ export async function POST(request: Request) {
     const input = asRecord(await request.json());
     if (!input) throw new InputError("Expected a JSON object.");
     const facility = parseFacility(input.facility);
-    const nddOnly = input.nddOnly === true;
+    const priority = parsePriority(input.priority);
     const jit = parseJit(input.jit);
     const international = parseInternational(input.international);
     const dateRange = parseDateRange(input.dateRange);
+    const category = parseOrderCategory(input.category);
     const force = input.force === true;
 
-    const key = cacheKey("delay-dashboard-cl", { facility, nddOnly, jit, international, dateRange });
+    const key = cacheKey("delay-dashboard-cl", { facility, priority, jit, international, dateRange, category });
     const result = await cached(key, REPORT_TTL_MS, () =>
-      fetchReport(request, facility, nddOnly, jit, international, dateRange), force);
+      fetchReport(request, facility, priority, jit, international, dateRange, category), force);
     return jsonResponse({ ok: true, data: result.value, cache: result.cache });
   } catch (error) {
     return responseError(error);
